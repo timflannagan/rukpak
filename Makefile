@@ -47,3 +47,14 @@ CONTROLLER_GEN=$(GOBIN)/controller-gen
 else
 CONTROLLER_GEN=$(shell which controller-gen)
 endif
+
+apply-manifests:
+	kubectl apply -f config/crd/bases
+
+build:
+	go build -o bin/tmp main.go
+
+.PHONY: vendor
+vendor:
+	go mod tidy
+	go mod vendor

@@ -1,0 +1,81 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  labels:
+    job-name: {{.JobName}}
+  name: {{.JobName}}
+  namespace: openshift-operator-lifecycle-manager
+spec:
+  # Need to first copy the
+  backoffLimit: 6
+  completions: 1
+  parallelism: 1
+  selector:
+    matchLabels:
+  template:
+    metadata:
+      creationTimestamp: null
+      labels:
+        job-name: {{.JobName}}
+    spec:
+      initContainers:
+      - name: copy
+        command:
+        - /bin/cp
+        - -Rv
+        - /bin/cpb
+        - /util/cpb
+        image: quay.io/openshift-release-dev/ocp-v4.0-art-dev@sha256:ddd1f9287c84cceb668e2ea3735fa5b65a8766a9b2fcaa5d6855be7e66b6d405
+        imagePullPolicy: IfNotPresent
+        name: util
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /util
+          name: util
+      - name: pull
+        command:
+        - /util/cpb
+        - /bundle
+        image: {{.BundleImage}}
+        imagePullPolicy: Always
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /bundle
+          name: bundle
+        - mountPath: /util
+          name: util
+      containers:
+      - name: unpack
+        command:
+        - opm
+        - alpha
+        - bundle
+        - extract
+        - -m
+        - /bundle/
+        - -n
+        - openshift-operator-lifecycle-manager
+        - -c
+        - {{.BundleConfigMapName}}
+        image: quay.io/operator-framework/upstream-opm-builder:v1.17.4
+        imagePullPolicy: IfNotPresent
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /bundle
+          name: bundle
+      dnsPolicy: ClusterFirst
+      restartPolicy: OnFailure
+      schedulerName: default-scheduler
+      serviceAccount: olm-operator-serviceaccount
+      serviceAccountName: olm-operator-serviceaccount
+      terminationGracePeriodSeconds: 30
+      volumes:
+      - name: data
+        emptyDir: {}
+      - name: util
+        emptyDir: {}
+      - name: bundle
+        emptyDir: {}

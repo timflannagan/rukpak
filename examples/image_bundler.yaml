@@ -1,0 +1,8 @@
+apiVersion: core.rukpak.io/v1alpha1
+kind: Bundle
+metadata:
+  name: metering
+spec:
+  class: olm.bundle
+  source:
+    ref: quay.io/tflannag/bundle:v4.8

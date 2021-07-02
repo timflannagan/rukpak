@@ -1,0 +1,14 @@
+apiVersion: core.rukpak.io/v1alpha1
+kind: Bundle
+metadata:
+  name: tflannag
+  namespace: tflannag
+spec:
+  class: "stub"
+  source:
+    ref: file://content
+    volumeMounts:
+    - mountPath: /content
+      configMap:
+        name: test
+        namespace: tflannag
