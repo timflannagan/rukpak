@@ -6,7 +6,6 @@ import (
 
 	"github.com/operator-framework/rukpak/pkg/k8s/provisioner"
 	"k8s.io/apimachinery/pkg/runtime"
-	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 
@@ -21,11 +20,6 @@ var (
 	setupLog = ctrl.Log.WithName("setup")
 )
 
-func init() {
-	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
-	//+kubebuilder:scaffold:scheme
-}
-
 func main() {
 	opts := zap.Options{
 		Development: true,
@@ -33,6 +27,10 @@ func main() {
 	opts.BindFlags(flag.CommandLine)
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		setupLog.Error(err, "failed to add a new scheme")
+		os.Exit(1)
+	}
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), manager.Options{
 		Scheme:    scheme,
 		Namespace: "openshift-operator-lifecycle-manager",
@@ -59,4 +57,5 @@ func main() {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
+	setupLog.Info("exiting manager")
 }

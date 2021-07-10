@@ -1,14 +1,20 @@
 package provisioner
 
 import (
+	"archive/tar"
 	"context"
 	"fmt"
+	"io"
+	"path/filepath"
 	"strings"
 
 	"github.com/go-logr/logr"
-	batchv1 "k8s.io/api/batch/v1"
+	"github.com/google/go-containerregistry/pkg/name"
+	"github.com/google/go-containerregistry/pkg/v1/mutate"
+	"github.com/google/go-containerregistry/pkg/v1/remote"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
@@ -16,26 +22,44 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	"github.com/operator-framework/rukpak/api/v1alpha1"
-	"github.com/operator-framework/rukpak/pkg/k8s/manifests"
 )
+
+// TODO(tlannag): Need to expose a way to configure the namespace the bundle volume content is being created in. A global namespace?
+// TODO(tflannag): Requeue after a period for bundles w/o a volume already present
+// TODO(tflannag): Flesh out local volume logic
+// TODO(tflannag): Add support for authentication
+// TODO(tflannag): Investigate a better way to expose this to the unpackBundle method
+// TODO(tflannag): Likely need to abstract this type of bundle unpacking logic further
+// TODO(tflannag): Unpack to a location instead of streaming to stdout
+// TODO(tflannag): Avoid hardcoding this -- either expose a directory or unpack _everything_
+// TODO(tflannag): Determine if there's a better way of filtering out bundles that contain the current ProvisionerClass metadata.NAme
+// TODO(tflannag): Need to configure this controller based on the parameters passed through here
+// TODO(tflannag): Likely want to be able to configure a ProvisionerClass to support
+// 				   a series of losely defined parameters, like use an existing volume for this bundle content
+// 		           or use this type of persistentvolume when attaching storage to a bundle content filesystem
+// TODO(tflannag): Add update support for configmap volumes
+// TODO(tflannag): Only filter for bundles that has something like a rukpak provisioner annotation present?
+// TODO(tflannag): Flesh out bundle updates, e.g. react to changes to something like an image tag changing
 
 var (
 	localSchemeBuilder = runtime.NewSchemeBuilder(
 		kscheme.AddToScheme,
 		v1alpha1.AddToScheme,
 	)
-
 	// AddToScheme adds all types necessary for the controller to operate.
 	AddToScheme = localSchemeBuilder.AddToScheme
 )
 
 const (
-	ID       v1alpha1.ProvisionerID = "operators.coreos.com/olm"
-	opmImage                        = "quay.io/operator-framework/upstream-opm-builder:v1.17.4"
+	ID              v1alpha1.ProvisionerID = "rukpack.io/k8s"
+	opmImage                               = "quay.io/operator-framework/upstream-opm-builder:v1.17.4"
+	volumeNamespace                        = "olm"
 )
 
 type Reconciler struct {
@@ -80,6 +104,7 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	})
 	err = ctrl.NewControllerManagedBy(mgr).
 		For(&v1alpha1.ProvisionerClass{}, builder.WithPredicates(predicateProvisionerIDFilter)).
+		Watches(&source.Kind{Type: &v1alpha1.Bundle{}}, handler.EnqueueRequestsFromMapFunc(r.bundleHandler)).
 		Complete(reconcile.Func(r.ReconcileProvisionerClass))
 	if err != nil {
 		return err
@@ -88,23 +113,47 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return nil
 }
 
+func (r *Reconciler) bundleHandler(obj client.Object) []reconcile.Request {
+	log := r.log.WithValues("bundle", obj.GetName())
+
+	nn := types.NamespacedName{Name: obj.GetName()}
+	bundle := &v1alpha1.Bundle{}
+	if err := r.Client.Get(context.TODO(), nn, bundle); err != nil {
+		return []reconcile.Request{}
+	}
+
+	provisioners := &v1alpha1.ProvisionerClassList{}
+	if err := r.Client.List(context.TODO(), provisioners); err != nil {
+		return []reconcile.Request{}
+	}
+	if len(provisioners.Items) == 0 {
+		return []reconcile.Request{}
+	}
+
+	res := []reconcile.Request{}
+	for _, provisioner := range provisioners.Items {
+		if provisioner.GetName() != string(bundle.Spec.Class) {
+			continue
+		}
+		res = append(res, reconcile.Request{NamespacedName: types.NamespacedName{Name: provisioner.GetName()}})
+	}
+	if len(res) == 0 {
+		log.Info("no provisionerclass(es) need to be requeued after encountering a bundle event")
+		return []reconcile.Request{}
+	}
+
+	log.Info("handler", "requeueing provisionerclass(es) after encountering a bundle event", nn.Name)
+	return res
+}
+
 func (r *Reconciler) ReconcileBundle(ctx context.Context, req ctrl.Request) (reconcile.Result, error) {
 	log := r.log.WithValues("request", req)
 	log.V(1).Info("reconciling bundle")
 
 	bundle := &v1alpha1.Bundle{}
 	if err := r.Get(ctx, req.NamespacedName, bundle); err != nil {
-		log.Error(err, "errors requesting bundle custom resource")
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
-
-	/*
-		- User creates a Bundle custom resource
-		- A ProvisionerClass resource ensures there's a volume creates for that Bundle resource and updates the status sub-resource field
-		- A Bundle resource will then ensure a Job is created that's responsible for unpacking those resources to a volume created by the Provisioner?
-
-		Bundle -> Provisioner creates volume -> Bundle unpacks content to that volume -> a filesystem HTTP API is created?
-	*/
 
 	bundleType := bundle.Spec.Source.Ref
 	if !strings.Contains(bundleType, "docker") {
@@ -116,68 +165,56 @@ func (r *Reconciler) ReconcileBundle(ctx context.Context, req ctrl.Request) (rec
 		return ctrl.Result{}, nil
 	}
 
-	if err := r.normalBundleUnpackJob(ctx, log, bundle); err != nil {
-		log.Error(err, "failed to create a bundle unpack job")
-		return ctrl.Result{}, err
+	if !strings.Contains(string(bundle.Spec.Source.Ref), "docker://") {
+		log.Info("bundle", "cannot process non-docker bundle sources", bundle.Name, "source", bundle.Spec.Class)
+		return ctrl.Result{}, nil
 	}
 
-	// Want:
-	// Content oracle -- Content(bundle.Spec.Source) io.Reader
-	// Open Question:
-	// 1. Check bundle state
-	// - look for unpack results
-	// - is there anything missing
-	// - does the digest match
-	// 2. Unpack bundle (if not) -- Asynchronous (maybe a Job)?
-	// - take the bundlesource
-	// - fire job based on type to unpack
-	// 3. Update status
+	if err := r.unpackBundle(bundle); err != nil {
+		log.Error(err, "failed to unpack bunde")
+		return ctrl.Result{}, err
+	}
 
 	return reconcile.Result{}, nil
 }
 
-func (r *Reconciler) normalBundleUnpackJob(ctx context.Context, log logr.Logger, bundle *v1alpha1.Bundle) error {
-	job := &batchv1.Job{}
-	jobNN := types.NamespacedName{
-		Name:      bundle.Name,
-		Namespace: "openshift-operator-lifecycle-manager",
+func (r *Reconciler) unpackBundle(bundle *v1alpha1.Bundle) error {
+	bundleSource := bundle.Spec.Source.Ref
+	if strings.Contains(bundleSource, "docker://") {
+		bundleSource = strings.TrimPrefix(bundleSource, "docker://")
 	}
+	log := r.log.WithValues("bundle source", bundleSource)
 
-	bundleType := bundle.Spec.Source.Ref
-	err := r.Client.Get(ctx, jobNN, job)
+	ref, err := name.ParseReference(bundleSource)
 	if err != nil {
-		log.Info("job already exists -- not updating (stub)")
-		return nil
+		return err
 	}
-	if apierrors.IsNotFound(err) {
-		config := manifests.BundleUnpackJobConfig{
-			JobName:             bundle.Name,
-			BundleImage:         strings.Replace(bundleType, "docker://", "", -1),
-			BundleConfigMapName: bundle.Status.Volume.Name,
-		}
-		log.Info("job", "rendering the Job Template", config)
-		data, err := manifests.NewJobTemplate(config)
-		if err != nil {
-			log.Error(err, "failed to instantiate a new job template")
-			return err
-		}
-
-		log.Info("serializing the rendered job template")
-		job, err := manifests.NewJobManifest(data)
-		if err != nil {
-			log.Error(err, "failed to serialize the job manifest from rendered template")
-			return err
-		}
-		log.Info("job", "configuration", job)
-
-		log.Info("job", "attempting to create the bundle unpack job", job.Name)
-		if err := r.Client.Create(ctx, job); err != nil {
-			log.Error(err, "failed to create the bundle unpack job")
-			return err
-		}
-		log.Info("job", "bundle unpack job created successfully", job.Name)
+	image, err := remote.Image(ref)
+	if err != nil {
+		return err
 	}
-	return nil
+
+	reader := mutate.Extract(image)
+	defer reader.Close()
+
+	source := "manifests"
+	t := tar.NewReader(reader)
+	for true {
+		header, err := t.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			log.Error(err, "failed to unpack tar header")
+		}
+		target := filepath.Clean(header.Name)
+		if !strings.Contains(target, source) {
+			continue
+		}
+		log.Info("processing file", "target", target, "source", source)
+	}
+
+	return err
 }
 
 func (r *Reconciler) ReconcileProvisionerClass(ctx context.Context, req ctrl.Request) (reconcile.Result, error) {
@@ -185,16 +222,11 @@ func (r *Reconciler) ReconcileProvisionerClass(ctx context.Context, req ctrl.Req
 	log := r.log.WithValues("request", req)
 	log.V(1).Info("reconciling provisionerclass")
 
-	// Are provisionerclass(es) namespaced-scoped resources?
 	pc := &v1alpha1.ProvisionerClass{}
 	if err := r.Client.Get(ctx, req.NamespacedName, pc); err != nil {
 		log.Error(err, "failed to query for the ProvisionerClass")
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
-	// we know we're only handling ProvisionerClass' that use the OLM provisioner ID
-	// need to configure this controller based on the parameters passed through here
-
-	// list bundles that match the current ProvisionerClass' metadata.Name
 
 	bundles := &v1alpha1.BundleList{}
 	if err := r.Client.List(ctx, bundles, client.InNamespace(req.Namespace)); err != nil {
@@ -205,93 +237,92 @@ func (r *Reconciler) ReconcileProvisionerClass(ctx context.Context, req ctrl.Req
 	filtered := []*v1alpha1.Bundle{}
 	for _, b := range bundles.Items {
 		if string(b.Spec.Class) != pc.Name {
+			log.Info("provisioner", "found bundle name that does not reference the current provisioner class", b.Name)
 			continue
 		}
 		filtered = append(filtered, &b)
 	}
+	if len(filtered) == 0 {
+		log.Info("no bundles found specifying the current provisionerclass")
+		return ctrl.Result{}, nil
+	}
 
-	// TODO(tflannag): Wrap this in a helper function
 	var errors []error
-	for _, b := range filtered {
-		if b.Status.Volume != nil {
-			// TODO(tflannag): Verify the status
-			continue
-		}
-
-		bundle := &v1alpha1.Bundle{}
-		if err := r.Client.Get(ctx, types.NamespacedName{Name: b.Name}, bundle); err != nil {
-			log.Error(err, "failed to get a bundle")
-			errors = append(errors, fmt.Errorf("failed to get a non-empty configmap"))
-			continue
-		}
-
-		log.Info("volume", "identified bundle missing configmap", bundle.Name)
-		cm, err := newConfigMap(r.Client, types.NamespacedName{Name: bundle.Name, Namespace: "openshift-operator-lifecycle-manager"})
-		if err != nil {
-			log.Error(err, "failed to get or create a fresh configmap")
+	for _, bundle := range filtered {
+		log.Info("provisioner", "found bundle name that references the current provisionerclass", bundle.Name)
+		if err := r.ensureBundleVolume(ctx, bundle.GetName()); err != nil {
 			errors = append(errors, err)
-			continue
 		}
-		if cm == nil {
-			errors = append(errors, fmt.Errorf("failed to get a non-empty configmap"))
-			continue
-		}
-
-		needsUpdate := false
-		if bundle.Status.Volume != nil {
-			log.Info("volume", "bundle contains an existing local object reference", bundle.Name, "checking if it matches an existing configmap")
-			if bundle.Status.Volume.Name == cm.Name {
-				continue
-			}
-			needsUpdate = true
-			log.Info("volume", "bundle contains an existing local object reference", bundle.Name, "does not match the configmap updating")
-		}
-		if bundle.Status.Volume == nil {
-			needsUpdate = true
-			log.Info("volume", "bundle does not contain a local object reference", bundle.Name, "updating it to use a configmap", cm.Name)
-		}
-		if !needsUpdate {
-			log.Info("volume", "not further updates are required for bundle", bundle.Name)
-			continue
-		}
-
-		log.Info("volume", "status updates are required for bundle", bundle.Name)
-		bundle.Status.Volume = &corev1.LocalObjectReference{
-			Name: cm.Name,
-		}
-		log.Info("volume", "attempting to update the bundle status", bundle.Name, "new bundle", bundle.Status)
-		if err := r.Status().Update(ctx, bundle); err != nil {
-			log.Error(err, "failed to update the bundle status", bundle.Name)
-			return ctrl.Result{}, err
-		}
-		log.Info("volume", "updated the bundle status", bundle.Name)
-	}
-	if len(errors) != 0 {
-		return ctrl.Result{}, utilerrors.NewAggregate(errors)
 	}
 
-	return reconcile.Result{}, nil
+	return ctrl.Result{}, utilerrors.NewAggregate(errors)
 }
 
-func get
+// ensureBundleVolume is a helper method responsible for ensuring the bundle's status
+// references an existing volume that will the content stored in the bundle sources'
+// filesystem.
+func (r *Reconciler) ensureBundleVolume(ctx context.Context, bundleName string) error {
+	nn := types.NamespacedName{Name: bundleName}
 
-// newConfigMap is a helper function that's responsible for building
-// up an empty ConfigMap that contains the requisite metadata and
-// ensures that ConfigMap resource is created if it doesn't exist.
-func newConfigMap(client client.Client, nn types.NamespacedName) (*corev1.ConfigMap, error) {
-	// need to set an owner reference
-	fresh := &corev1.ConfigMap{}
-	fresh.SetNamespace(nn.Namespace)
-	fresh.SetName(nn.Name)
-
-	var configmap corev1.ConfigMap
-	err := client.Get(context.TODO(), nn, &configmap)
-	if apierrors.IsNotFound(err) {
-		if err := client.Create(context.TODO(), fresh); err != nil {
-			return nil, err
-		}
-		return fresh, nil
+	fresh := &v1alpha1.Bundle{}
+	if err := r.Client.Get(ctx, nn, fresh); err != nil {
+		return err
 	}
 
-	return fresh, err
+	if fresh.Status.Volume != nil {
+		// FIXME
+		r.log.Info("volume", "(stub) bundle volume already exists not validating yet", fresh.Name)
+		return nil
+	}
+
+	cm, err := createConfigMap(ctx, r.Client, fresh)
+	if err != nil {
+		return err
+	}
+	fresh.Status.Volume = &corev1.LocalObjectReference{
+		Name: cm.GetName(),
+	}
+
+	r.log.Info("volume", "attempting to update the bundle volume", fresh.GetName(), "with configmap name", cm.GetName())
+	if err := r.Client.Status().Update(ctx, fresh); err != nil {
+		return err
+	}
+	r.log.Info("volume", "bundle status has been updated to point to a volume created", fresh.GetName())
+
+	return nil
+}
+
+func createConfigMap(
+	ctx context.Context,
+	client client.Client,
+	bundle *v1alpha1.Bundle,
+) (*corev1.ConfigMap, error) {
+	nn := types.NamespacedName{
+		Name:      fmt.Sprintf("%s-configmap", bundle.Name),
+		Namespace: "olm",
+	}
+
+	fresh := &corev1.ConfigMap{}
+	fresh.SetName(nn.Name)
+	fresh.SetNamespace(nn.Namespace)
+	fresh.SetOwnerReferences([]v1.OwnerReference{
+		{
+			Kind:       bundle.Kind,
+			APIVersion: bundle.APIVersion,
+			Name:       bundle.Name,
+			UID:        bundle.UID,
+		},
+	})
+
+	err := client.Get(ctx, nn, fresh)
+	if err != nil && !apierrors.IsNotFound(err) {
+		return nil, err
+	}
+	if apierrors.IsNotFound(err) {
+		if err := client.Create(ctx, fresh); err != nil {
+			return nil, err
+		}
+	}
+
+	return fresh, nil
 }
