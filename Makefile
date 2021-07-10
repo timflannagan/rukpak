@@ -48,6 +48,11 @@ else
 CONTROLLER_GEN=$(shell which controller-gen)
 endif
 
+install: manifests
+	kind create cluster
+	kind export kubeconfig
+	$(MAKE) apply-manifests
+
 apply-manifests:
 	kubectl apply -f config/crd/bases
 
