@@ -1,0 +1,6 @@
+apiVersion: core.rukpak.io/v1alpha1
+kind: ProvisionerClass
+metadata:
+  name: rukpak-remote
+spec:
+  provisioner: rukpack.io/k8s

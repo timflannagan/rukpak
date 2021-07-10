@@ -1,8 +1,8 @@
 apiVersion: core.rukpak.io/v1alpha1
 kind: Bundle
 metadata:
-  name: metering
+  name: scratch
 spec:
   class: rukpak-remote
   source:
-    ref: docker://quay.io/tflannag/bundle:v4.8
+    ref: docker://quay.io/tflannag/bundle:scratch

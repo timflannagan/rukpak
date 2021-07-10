@@ -1,0 +1,4 @@
+FROM alpine
+
+COPY ../manifests /manifests
+CMD ["/bin/sh"]
