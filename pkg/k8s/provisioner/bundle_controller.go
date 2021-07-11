@@ -1,19 +1,14 @@
 package provisioner
 
 import (
-	"archive/tar"
 	"context"
 	"fmt"
-	"io"
-	"path/filepath"
 	"strings"
 
 	"github.com/go-logr/logr"
-	"github.com/google/go-containerregistry/pkg/name"
-	"github.com/google/go-containerregistry/pkg/v1/mutate"
-	"github.com/google/go-containerregistry/pkg/v1/remote"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apiresource "k8s.io/apimachinery/pkg/api/resource"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -28,6 +23,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	"github.com/operator-framework/rukpak/api/v1alpha1"
+	"github.com/operator-framework/rukpak/pkg/k8s/manifests"
 )
 
 // TODO(tlannag): Need to expose a way to configure the namespace the bundle volume content is being created in. A global namespace?
@@ -57,8 +53,9 @@ var (
 )
 
 const (
+	// ID is the rukpak provisioner's unique ID. Only ProvisionerClass(es) that specify
+	// this unique ID will be managed by this provisioner controller.
 	ID              v1alpha1.ProvisionerID = "rukpack.io/k8s"
-	opmImage                               = "quay.io/operator-framework/upstream-opm-builder:v1.17.4"
 	volumeNamespace                        = "olm"
 )
 
@@ -146,6 +143,9 @@ func (r *Reconciler) bundleHandler(obj client.Object) []reconcile.Request {
 	return res
 }
 
+// ReconcileBundle contains the main reconciliation logic for ensuring that arbitrary content
+// specified in Bundle custom resources are unpacked and exposed to clients to be inspected,
+// installed, etc.
 func (r *Reconciler) ReconcileBundle(ctx context.Context, req ctrl.Request) (reconcile.Result, error) {
 	log := r.log.WithValues("request", req)
 	log.V(1).Info("reconciling bundle")
@@ -179,44 +179,48 @@ func (r *Reconciler) ReconcileBundle(ctx context.Context, req ctrl.Request) (rec
 }
 
 func (r *Reconciler) unpackBundle(bundle *v1alpha1.Bundle) error {
+	// TODO(tflannag): Likely want to have this logic live inside of a pod
+	// so we can mount volumes and treat everything as a filesystem.
 	bundleSource := bundle.Spec.Source.Ref
 	if strings.Contains(bundleSource, "docker://") {
 		bundleSource = strings.TrimPrefix(bundleSource, "docker://")
 	}
-	log := r.log.WithValues("bundle source", bundleSource)
 
-	ref, err := name.ParseReference(bundleSource)
-	if err != nil {
-		return err
-	}
-	image, err := remote.Image(ref)
-	if err != nil {
+	if err := r.newUnpackJob("quay.io/tflannag/manifest:unpacker"); err != nil {
 		return err
 	}
 
-	reader := mutate.Extract(image)
-	defer reader.Close()
-
-	source := "manifests"
-	t := tar.NewReader(reader)
-	for true {
-		header, err := t.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			log.Error(err, "failed to unpack tar header")
-		}
-		target := filepath.Clean(header.Name)
-		if !strings.Contains(target, source) {
-			continue
-		}
-		log.Info("processing file", "target", target, "source", source)
-	}
-
-	return err
+	return nil
 }
 
+func (r *Reconciler) newUnpackJob(image string) error {
+	// setup ttl delete
+	config := manifests.BundleUnpackJobConfig{
+		JobName:      "tmp",
+		JobNamespace: "olm",
+		BundleImage:  image,
+	}
+	data, err := manifests.NewJobTemplate(config)
+	if err != nil {
+		return err
+	}
+	job, err := manifests.NewJobManifest(data)
+	if err != nil {
+		return err
+	}
+	if err := r.Client.Create(context.Background(), job); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+
+	return nil
+}
+
+// ReconcileProvisionerClass is responsible for ensuring the specification defined in
+// an individual ProvisionerClass custom resources matches the on-cluster state of
+// the resource. A Bundle custom resource referencing an individual ProvisionerClass'
+// metadata.Name will be managed by the reconciliation loop, ensuring that a volume
+// exists such that arbitrary content specified in a Bundle custom resource and be
+// available for inspection to end-users.
 func (r *Reconciler) ReconcileProvisionerClass(ctx context.Context, req ctrl.Request) (reconcile.Result, error) {
 	// Set up a convenient log object so we don't have to type request over and over again
 	log := r.log.WithValues("request", req)
@@ -224,7 +228,6 @@ func (r *Reconciler) ReconcileProvisionerClass(ctx context.Context, req ctrl.Req
 
 	pc := &v1alpha1.ProvisionerClass{}
 	if err := r.Client.Get(ctx, req.NamespacedName, pc); err != nil {
-		log.Error(err, "failed to query for the ProvisionerClass")
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
@@ -263,8 +266,8 @@ func (r *Reconciler) ReconcileProvisionerClass(ctx context.Context, req ctrl.Req
 // filesystem.
 func (r *Reconciler) ensureBundleVolume(ctx context.Context, bundleName string) error {
 	nn := types.NamespacedName{Name: bundleName}
-
 	fresh := &v1alpha1.Bundle{}
+
 	if err := r.Client.Get(ctx, nn, fresh); err != nil {
 		return err
 	}
@@ -275,21 +278,57 @@ func (r *Reconciler) ensureBundleVolume(ctx context.Context, bundleName string) 
 		return nil
 	}
 
-	cm, err := createConfigMap(ctx, r.Client, fresh)
+	pv, err := r.createPV(fresh.GetName())
 	if err != nil {
 		return err
 	}
 	fresh.Status.Volume = &corev1.LocalObjectReference{
-		Name: cm.GetName(),
+		Name: pv.GetName(),
 	}
 
-	r.log.Info("volume", "attempting to update the bundle volume", fresh.GetName(), "with configmap name", cm.GetName())
+	r.log.Info("volume", "attempting to update the bundle volume", fresh.GetName(), "with pv name", pv.GetName())
 	if err := r.Client.Status().Update(ctx, fresh); err != nil {
 		return err
 	}
 	r.log.Info("volume", "bundle status has been updated to point to a volume created", fresh.GetName())
 
 	return nil
+}
+
+func (r *Reconciler) createPV(bundleName string) (*corev1.PersistentVolume, error) {
+	pvName := fmt.Sprintf("%s-pvc", bundleName)
+	nn := types.NamespacedName{Name: pvName, Namespace: "olm"}
+	pv := &corev1.PersistentVolume{}
+	ctx := context.Background()
+
+	if err := r.Client.Get(ctx, nn, pv); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return nil, err
+		}
+
+		pv.SetName(pvName)
+		pv.SetNamespace("olm")
+		volumeMode := corev1.PersistentVolumeFilesystem
+		pv.Spec = corev1.PersistentVolumeSpec{
+			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			VolumeMode:  &volumeMode,
+			Capacity: corev1.ResourceList{
+				corev1.ResourceName(corev1.ResourceStorage): apiresource.MustParse("2Gi"),
+			},
+			PersistentVolumeSource: corev1.PersistentVolumeSource{
+				HostPath: &corev1.HostPathVolumeSource{
+					Path: "/manifests",
+				},
+			},
+		}
+		r.log.Info("provisioner", "attempting to create a pv for the bundle name", bundleName)
+		if err := r.Client.Create(ctx, pv); err != nil {
+			return nil, err
+		}
+		r.log.Info("provisioner", "created a pv for the bundle name", bundleName)
+	}
+
+	return pv, nil
 }
 
 func createConfigMap(

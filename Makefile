@@ -48,14 +48,19 @@ else
 CONTROLLER_GEN=$(shell which controller-gen)
 endif
 
-install: manifests
+kind-install:
 	kind create cluster
 	kind export kubeconfig
+	$(MAKE) install
+
+install: manifests
 	$(MAKE) apply-manifests
+	kubectl create ns olm
 
 apply-manifests:
 	kubectl apply -f config/crd/bases
 
+.PHONY: build
 build:
 	go build -o bin/tmp main.go
 
@@ -63,3 +68,7 @@ build:
 vendor:
 	go mod tidy
 	go mod vendor
+
+.PHONY: bin/unpacker
+bin/unpacker:
+	go build -o bin/unpacker cmd/unpacker/main.go

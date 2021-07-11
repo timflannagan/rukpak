@@ -15,9 +15,9 @@ var (
 )
 
 type BundleUnpackJobConfig struct {
-	JobName             string
-	BundleImage         string
-	BundleConfigMapName string
+	JobName      string
+	JobNamespace string
+	BundleImage  string
 }
 
 func NewJobTemplate(config BundleUnpackJobConfig) ([]byte, error) {
