@@ -23,6 +23,7 @@ var (
 const (
 	// TODO: add this as a flag that defaults to the upstream namespace
 	globalNamespace = "rukpak"
+	unpackImage     = "quay.io/tflannag/manifest:unpacker"
 )
 
 // TODO: handle adding a generateName for the bundle unpacking to avoid ifalreadyexists errors during the create call?
@@ -47,7 +48,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	r, err := provisioner.NewReconciler(mgr.GetClient(), setupLog, scheme, globalNamespace)
+	r, err := provisioner.NewReconciler(
+		mgr.GetClient(),
+		setupLog,
+		scheme,
+		globalNamespace,
+		unpackImage,
+	)
 	if err != nil {
 		setupLog.Error(err, "failed to create a new reconciler")
 		os.Exit(1)

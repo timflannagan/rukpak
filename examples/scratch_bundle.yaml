@@ -6,8 +6,3 @@ spec:
   class: rukpak-remote
   source:
     ref: docker://quay.io/tflannag/bundle:scratch
-    volumeMounts:
-    - mountPath: /content
-      configMap:
-        name: test
-        namespace: olm

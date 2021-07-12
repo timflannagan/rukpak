@@ -19,6 +19,7 @@ type BundleUnpackJobConfig struct {
 	JobNamespace string
 	PVCName      string
 	BundleImage  string
+	UnpackImage  string
 }
 
 func NewJobTemplate(config BundleUnpackJobConfig) ([]byte, error) {

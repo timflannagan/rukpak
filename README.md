@@ -15,5 +15,5 @@ The component responsible for unpacking bundle content requires root permissions
 When running on OpenShift clusters, ensure the `admin` serviceaccount resource has the `anyuid` SSC permissions:
 
 ```bash
-oc -n olm adm policy add-scc-to-user anyuid -z admin
+oc -n rukpak adm policy add-scc-to-user anyuid -z admin
 ```

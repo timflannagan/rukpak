@@ -61,6 +61,7 @@ type Reconciler struct {
 	client.Client
 	log             logr.Logger
 	globalNamespace string
+	unpackImage     string
 }
 
 // NewReconciler constructs and returns an BundleReconciler.
@@ -70,7 +71,8 @@ func NewReconciler(
 	cli client.Client,
 	log logr.Logger,
 	scheme *runtime.Scheme,
-	globalNamespace string,
+	globalNamespace,
+	unpackImage string,
 ) (*Reconciler, error) {
 	// Add watched types to scheme.
 	if err := AddToScheme(scheme); err != nil {
@@ -81,6 +83,7 @@ func NewReconciler(
 		Client:          cli,
 		log:             log,
 		globalNamespace: globalNamespace,
+		unpackImage:     unpackImage,
 	}, nil
 }
 
@@ -186,25 +189,27 @@ func (r *Reconciler) ReconcileBundle(ctx context.Context, req ctrl.Request) (rec
 }
 
 func (r *Reconciler) unpackBundle(bundle *v1alpha1.Bundle) error {
-	// TODO(tflannag): Likely want to have this logic live inside of a pod
-	// so we can mount volumes and treat everything as a filesystem.
 	bundleSource := bundle.Spec.Source.Ref
 	if strings.Contains(bundleSource, "docker://") {
 		bundleSource = strings.TrimPrefix(bundleSource, "docker://")
 	}
 
-	if err := r.newUnpackJob(bundle.Status.Volume.Name, "quay.io/tflannag/manifest:unpacker"); err != nil {
+	if err := r.newUnpackJob(bundle.Status.Volume.Name, bundle.Name, bundleSource); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-func (r *Reconciler) newUnpackJob(pvcName, image string) error {
+func (r *Reconciler) newUnpackJob(pvcName, name, image string) error {
+	r.log.Info("creating job", "job namespace", r.globalNamespace, "job unpack image", r.unpackImage)
+
 	// setup ttl delete
+	jobName := fmt.Sprintf("%s-bundle-job", name)
 	config := manifests.BundleUnpackJobConfig{
-		JobName:      "tmp",
+		JobName:      jobName,
 		JobNamespace: r.globalNamespace,
+		UnpackImage:  r.unpackImage,
 		BundleImage:  image,
 		PVCName:      pvcName,
 	}
@@ -217,7 +222,10 @@ func (r *Reconciler) newUnpackJob(pvcName, image string) error {
 		return err
 	}
 	if err := r.Client.Create(context.Background(), job); err != nil {
-		return client.IgnoreNotFound(err)
+		if apierrors.IsAlreadyExists(err) {
+			return nil
+		}
+		return err
 	}
 
 	return nil
@@ -275,7 +283,6 @@ func (r *Reconciler) ReconcileProvisionerClass(ctx context.Context, req ctrl.Req
 func (r *Reconciler) ensureBundleVolume(ctx context.Context, bundleName string) error {
 	nn := types.NamespacedName{Name: bundleName}
 	fresh := &v1alpha1.Bundle{}
-
 	if err := r.Client.Get(ctx, nn, fresh); err != nil {
 		return err
 	}
@@ -286,15 +293,15 @@ func (r *Reconciler) ensureBundleVolume(ctx context.Context, bundleName string) 
 		return nil
 	}
 
-	pv, err := r.createPV(fresh.GetName())
+	pvc, err := r.createPVC(fresh.GetName())
 	if err != nil {
 		return err
 	}
 	fresh.Status.Volume = &corev1.LocalObjectReference{
-		Name: pv.GetName(),
+		Name: pvc.GetName(),
 	}
 
-	r.log.Info("volume", "attempting to update the bundle volume", fresh.GetName(), "with pv name", pv.GetName())
+	r.log.Info("volume", "attempting to update the bundle volume", fresh.GetName(), "with pvc name", pvc.GetName())
 	if err := r.Client.Status().Update(ctx, fresh); err != nil {
 		return err
 	}
@@ -303,38 +310,34 @@ func (r *Reconciler) ensureBundleVolume(ctx context.Context, bundleName string) 
 	return nil
 }
 
-func (r *Reconciler) createPV(bundleName string) (*corev1.PersistentVolume, error) {
-	pvName := fmt.Sprintf("%s-pvc", bundleName)
-	nn := types.NamespacedName{Name: pvName, Namespace: r.globalNamespace}
-	pv := &corev1.PersistentVolume{}
+func (r *Reconciler) createPVC(bundleName string) (*corev1.PersistentVolumeClaim, error) {
+	pvcName := fmt.Sprintf("%s-pvc", bundleName)
+	pvc := &corev1.PersistentVolumeClaim{}
 	ctx := context.Background()
 
-	if err := r.Client.Get(ctx, nn, pv); err != nil {
+	nn := types.NamespacedName{Name: pvcName, Namespace: r.globalNamespace}
+	if err := r.Client.Get(ctx, nn, pvc); err != nil {
 		if !apierrors.IsNotFound(err) {
 			return nil, err
 		}
 
-		pv.SetName(pvName)
-		pv.SetNamespace(r.globalNamespace)
+		pvc.SetName(pvcName)
+		pvc.SetNamespace(r.globalNamespace)
 		volumeMode := corev1.PersistentVolumeFilesystem
-		pv.Spec = corev1.PersistentVolumeSpec{
-			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+
+		pvc.Spec = corev1.PersistentVolumeClaimSpec{
 			VolumeMode:  &volumeMode,
-			Capacity: corev1.ResourceList{
-				corev1.ResourceName(corev1.ResourceStorage): apiresource.MustParse("2Gi"),
-			},
-			PersistentVolumeSource: corev1.PersistentVolumeSource{
-				HostPath: &corev1.HostPathVolumeSource{
-					Path: "/manifests",
+			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+			Resources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceStorage: apiresource.MustParse("2Gi"),
 				},
 			},
 		}
-		r.log.Info("provisioner", "attempting to create a pv for the bundle name", bundleName)
-		if err := r.Client.Create(ctx, pv); err != nil {
+		if err := r.Client.Create(ctx, pvc); err != nil {
 			return nil, err
 		}
-		r.log.Info("provisioner", "created a pv for the bundle name", bundleName)
 	}
 
-	return pv, nil
+	return pvc, nil
 }

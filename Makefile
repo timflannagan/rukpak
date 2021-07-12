@@ -55,7 +55,7 @@ kind-install:
 
 install: manifests
 	$(MAKE) apply-manifests
-	kubectl create ns olm
+	kubectl create ns rukpak
 
 apply-manifests:
 	kubectl apply -f config/crd/bases
@@ -71,4 +71,4 @@ bin/provisioner:
 
 .PHONY: bin/unpacker
 bin/unpacker:
-	go build -o bin/unpacker cmd/unpacker/main.go
+	go build -o bin/unpacker ./cmd/bundle

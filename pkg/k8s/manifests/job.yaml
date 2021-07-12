@@ -19,15 +19,19 @@ spec:
       restartPolicy: Never
       containers:
       - name: test
-        image: {{.BundleImage}}
+        image: {{.UnpackImage}}
+        command:
+          - bin/unpacker
+        args:
+          - --image {{.BundleImage}}
+          - --manifest-dir /input
+          - --output-dir /new
         imagePullPolicy: Always
         volumeMounts:
-          - mountPath: /manifests
+          - mountPath: /input
             name: manifests
       serviceAccountName: admin
       volumes:
         - name: manifests
           persistentVolumeClaim:
             claimName: {{.PVCName}}
-      imagePullSecrets:
-      - name: regcred
