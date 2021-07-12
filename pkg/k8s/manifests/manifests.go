@@ -17,6 +17,7 @@ var (
 type BundleUnpackJobConfig struct {
 	JobName      string
 	JobNamespace string
+	PVCName      string
 	BundleImage  string
 }
 

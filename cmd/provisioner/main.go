@@ -20,6 +20,12 @@ var (
 	setupLog = ctrl.Log.WithName("setup")
 )
 
+const (
+	// TODO: add this as a flag that defaults to the upstream namespace
+	globalNamespace = "rukpak"
+)
+
+// TODO: handle adding a generateName for the bundle unpacking to avoid ifalreadyexists errors during the create call?
 func main() {
 	opts := zap.Options{
 		Development: true,
@@ -31,16 +37,17 @@ func main() {
 		setupLog.Error(err, "failed to add a new scheme")
 		os.Exit(1)
 	}
+
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), manager.Options{
 		Scheme:    scheme,
-		Namespace: "openshift-operator-lifecycle-manager",
+		Namespace: globalNamespace,
 	})
 	if err != nil {
 		setupLog.Error(err, "failed to setup manager instance")
 		os.Exit(1)
 	}
 
-	r, err := provisioner.NewReconciler(mgr.GetClient(), setupLog, scheme)
+	r, err := provisioner.NewReconciler(mgr.GetClient(), setupLog, scheme, globalNamespace)
 	if err != nil {
 		setupLog.Error(err, "failed to create a new reconciler")
 		os.Exit(1)

@@ -6,7 +6,7 @@ metadata:
   name: {{.JobName}}
   namespace: {{.JobNamespace}}
 spec:
-  # Need to first copy the
+  ttlSecondsAfterFinished: 60
   backoffLimit: 2
   completions: 1
   parallelism: 1
@@ -28,6 +28,6 @@ spec:
       volumes:
         - name: manifests
           persistentVolumeClaim:
-            claimName: tmp
+            claimName: {{.PVCName}}
       imagePullSecrets:
       - name: regcred

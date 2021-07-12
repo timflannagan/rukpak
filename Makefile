@@ -60,14 +60,14 @@ install: manifests
 apply-manifests:
 	kubectl apply -f config/crd/bases
 
-.PHONY: build
-build:
-	go build -o bin/tmp main.go
-
 .PHONY: vendor
 vendor:
 	go mod tidy
 	go mod vendor
+
+.PHONY: bin/provisioner
+bin/provisioner:
+	go build -o bin/provisioner cmd/provisioner/main.go
 
 .PHONY: bin/unpacker
 bin/unpacker:

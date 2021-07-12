@@ -9,7 +9,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apiresource "k8s.io/apimachinery/pkg/api/resource"
-	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
@@ -55,26 +54,33 @@ var (
 const (
 	// ID is the rukpak provisioner's unique ID. Only ProvisionerClass(es) that specify
 	// this unique ID will be managed by this provisioner controller.
-	ID              v1alpha1.ProvisionerID = "rukpack.io/k8s"
-	volumeNamespace                        = "olm"
+	ID v1alpha1.ProvisionerID = "rukpack.io/k8s"
 )
 
 type Reconciler struct {
 	client.Client
-	log logr.Logger
+	log             logr.Logger
+	globalNamespace string
 }
 
 // NewReconciler constructs and returns an BundleReconciler.
 // As a side effect, the given scheme has operator discovery types added to it.
-func NewReconciler(cli client.Client, log logr.Logger, scheme *runtime.Scheme) (*Reconciler, error) {
+// TODO: implement the options pattern instead - use custom type instead of a long list of parameters?
+func NewReconciler(
+	cli client.Client,
+	log logr.Logger,
+	scheme *runtime.Scheme,
+	globalNamespace string,
+) (*Reconciler, error) {
 	// Add watched types to scheme.
 	if err := AddToScheme(scheme); err != nil {
 		return nil, err
 	}
 
 	return &Reconciler{
-		Client: cli,
-		log:    log,
+		Client:          cli,
+		log:             log,
+		globalNamespace: globalNamespace,
 	}, nil
 }
 
@@ -132,6 +138,7 @@ func (r *Reconciler) bundleHandler(obj client.Object) []reconcile.Request {
 		if provisioner.GetName() != string(bundle.Spec.Class) {
 			continue
 		}
+		// TODO(tflannag): Should the ProvisionerClass be namespaced-scoped?
 		res = append(res, reconcile.Request{NamespacedName: types.NamespacedName{Name: provisioner.GetName()}})
 	}
 	if len(res) == 0 {
@@ -186,19 +193,20 @@ func (r *Reconciler) unpackBundle(bundle *v1alpha1.Bundle) error {
 		bundleSource = strings.TrimPrefix(bundleSource, "docker://")
 	}
 
-	if err := r.newUnpackJob("quay.io/tflannag/manifest:unpacker"); err != nil {
+	if err := r.newUnpackJob(bundle.Status.Volume.Name, "quay.io/tflannag/manifest:unpacker"); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-func (r *Reconciler) newUnpackJob(image string) error {
+func (r *Reconciler) newUnpackJob(pvcName, image string) error {
 	// setup ttl delete
 	config := manifests.BundleUnpackJobConfig{
 		JobName:      "tmp",
-		JobNamespace: "olm",
+		JobNamespace: r.globalNamespace,
 		BundleImage:  image,
+		PVCName:      pvcName,
 	}
 	data, err := manifests.NewJobTemplate(config)
 	if err != nil {
@@ -297,7 +305,7 @@ func (r *Reconciler) ensureBundleVolume(ctx context.Context, bundleName string) 
 
 func (r *Reconciler) createPV(bundleName string) (*corev1.PersistentVolume, error) {
 	pvName := fmt.Sprintf("%s-pvc", bundleName)
-	nn := types.NamespacedName{Name: pvName, Namespace: "olm"}
+	nn := types.NamespacedName{Name: pvName, Namespace: r.globalNamespace}
 	pv := &corev1.PersistentVolume{}
 	ctx := context.Background()
 
@@ -307,7 +315,7 @@ func (r *Reconciler) createPV(bundleName string) (*corev1.PersistentVolume, erro
 		}
 
 		pv.SetName(pvName)
-		pv.SetNamespace("olm")
+		pv.SetNamespace(r.globalNamespace)
 		volumeMode := corev1.PersistentVolumeFilesystem
 		pv.Spec = corev1.PersistentVolumeSpec{
 			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
@@ -329,39 +337,4 @@ func (r *Reconciler) createPV(bundleName string) (*corev1.PersistentVolume, erro
 	}
 
 	return pv, nil
-}
-
-func createConfigMap(
-	ctx context.Context,
-	client client.Client,
-	bundle *v1alpha1.Bundle,
-) (*corev1.ConfigMap, error) {
-	nn := types.NamespacedName{
-		Name:      fmt.Sprintf("%s-configmap", bundle.Name),
-		Namespace: "olm",
-	}
-
-	fresh := &corev1.ConfigMap{}
-	fresh.SetName(nn.Name)
-	fresh.SetNamespace(nn.Namespace)
-	fresh.SetOwnerReferences([]v1.OwnerReference{
-		{
-			Kind:       bundle.Kind,
-			APIVersion: bundle.APIVersion,
-			Name:       bundle.Name,
-			UID:        bundle.UID,
-		},
-	})
-
-	err := client.Get(ctx, nn, fresh)
-	if err != nil && !apierrors.IsNotFound(err) {
-		return nil, err
-	}
-	if apierrors.IsNotFound(err) {
-		if err := client.Create(ctx, fresh); err != nil {
-			return nil, err
-		}
-	}
-
-	return fresh, nil
 }
