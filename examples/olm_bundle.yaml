@@ -1,0 +1,8 @@
+apiVersion: core.rukpak.io/v1alpha1
+kind: Bundle
+metadata:
+  name: olm
+spec:
+  class: rukpak-remote
+  source:
+    ref: docker://quay.io/tflannag/manifest:olm
