@@ -6,7 +6,9 @@ import (
 	"strings"
 
 	"github.com/go-logr/logr"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	kscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -175,8 +177,18 @@ func (r *Reconciler) ReconcileBundle(ctx context.Context, req ctrl.Request) (rec
 		return ctrl.Result{}, nil
 	}
 
+	// TODO(tflannag): Should shard the filesystem content better so it's namespaced
+	// at least by bundle name
+	// TODO(tflannag): Need to wait until the job that's unpacking contents has become
+	// ready before serving filesystem content.
+	// TODO(tflannag): Need a way to rotate the serving Pod when changes have been made
+	// to the underlying sub-directory filesystem.
 	if err := r.unpackBundle(bundle); err != nil {
 		log.Error(err, "failed to unpack bunde")
+		return ctrl.Result{}, err
+	}
+	if err := r.ensureManifestService(bundle.Name, 8081); err != nil {
+		log.Error(err, "failed to ensure the manifest serving service exists")
 		return ctrl.Result{}, err
 	}
 	// TODO(tflannag): The --directory option doesn't seem to play well with the mountPath provided
@@ -188,10 +200,41 @@ func (r *Reconciler) ReconcileBundle(ctx context.Context, req ctrl.Request) (rec
 	return reconcile.Result{}, nil
 }
 
+func (r *Reconciler) ensureManifestService(name string, port int32) error {
+	r.log.Info("serve", "ensuring a service exists for serving bundle manifest content", name)
+
+	service := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      fmt.Sprintf("%s-service", name),
+			Namespace: r.globalNamespace,
+		},
+		Spec: corev1.ServiceSpec{
+			Ports: []corev1.ServicePort{{
+				Name: "serving",
+				Port: port,
+			}},
+			Selector: map[string]string{
+				// TODO(tflannag): Use a better label in the Pod manifest template
+				"name": name,
+			},
+		},
+	}
+	err := r.Client.Create(context.Background(), service)
+	if err != nil {
+		if apierrors.IsAlreadyExists(err) {
+			return nil
+		}
+		return err
+	}
+	// TODO: reconcile state as needed
+
+	return nil
+}
+
 func (r *Reconciler) createManifestServingPod(name, pvcName, mountpath string) error {
 	r.log.Info("serve", "creating a pod that serves the manifest bundle content", name, "using pvc name", pvcName, "and mountpath", mountpath)
 	config := manifests.ManifestServingPod{
-		PodName:      name,
+		PodName:      fmt.Sprintf("%s-serve", name),
 		PodNamespace: r.globalNamespace,
 		ServeImage:   "quay.io/tflannag/manifests:servev2",
 		PVCName:      pvcName,
