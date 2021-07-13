@@ -72,3 +72,8 @@ bin/provisioner:
 .PHONY: bin/unpacker
 bin/unpacker:
 	go build -o bin/unpacker ./cmd/bundle
+
+.PHONY: bin/serve
+bin/serve:
+	# go build -tags netgo -ldflags="-extldflags=-static" -o bin/serve ./cmd/serve/...
+	go build -tags netgo -o bin/serve ./cmd/serve/...

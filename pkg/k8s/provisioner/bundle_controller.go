@@ -6,12 +6,8 @@ import (
 	"strings"
 
 	"github.com/go-logr/logr"
-	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	apiresource "k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/types"
-	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	kscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -122,9 +118,8 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 func (r *Reconciler) bundleHandler(obj client.Object) []reconcile.Request {
 	log := r.log.WithValues("bundle", obj.GetName())
 
-	nn := types.NamespacedName{Name: obj.GetName()}
 	bundle := &v1alpha1.Bundle{}
-	if err := r.Client.Get(context.TODO(), nn, bundle); err != nil {
+	if err := r.Client.Get(context.TODO(), getNonNamespacedName(obj.GetName()), bundle); err != nil {
 		return []reconcile.Request{}
 	}
 
@@ -142,14 +137,14 @@ func (r *Reconciler) bundleHandler(obj client.Object) []reconcile.Request {
 			continue
 		}
 		// TODO(tflannag): Should the ProvisionerClass be namespaced-scoped?
-		res = append(res, reconcile.Request{NamespacedName: types.NamespacedName{Name: provisioner.GetName()}})
+		res = append(res, reconcile.Request{NamespacedName: getNonNamespacedName(provisioner.GetName())})
 	}
 	if len(res) == 0 {
 		log.Info("no provisionerclass(es) need to be requeued after encountering a bundle event")
 		return []reconcile.Request{}
 	}
 
-	log.Info("handler", "requeueing provisionerclass(es) after encountering a bundle event", nn.Name)
+	log.Info("handler", "requeueing provisionerclass(es) after encountering a bundle event", obj.GetName())
 	return res
 }
 
@@ -184,8 +179,37 @@ func (r *Reconciler) ReconcileBundle(ctx context.Context, req ctrl.Request) (rec
 		log.Error(err, "failed to unpack bunde")
 		return ctrl.Result{}, err
 	}
+	// TODO(tflannag): The --directory option doesn't seem to play well with the mountPath provided
+	if err := r.createManifestServingPod(bundle.Name, bundle.Status.Volume.Name, "/manifests"); err != nil {
+		log.Error(err, "failed to create a manifest filesystem serving pod")
+		return ctrl.Result{}, err
+	}
 
 	return reconcile.Result{}, nil
+}
+
+func (r *Reconciler) createManifestServingPod(name, pvcName, mountpath string) error {
+	r.log.Info("serve", "creating a pod that serves the manifest bundle content", name, "using pvc name", pvcName, "and mountpath", mountpath)
+	config := manifests.ManifestServingPod{
+		PodName:      name,
+		PodNamespace: r.globalNamespace,
+		ServeImage:   "quay.io/tflannag/manifests:servev2",
+		PVCName:      pvcName,
+		PVCMountPath: mountpath,
+	}
+
+	pod, err := manifests.NewManifestServingPod(config)
+	if err != nil {
+		return err
+	}
+	if err := r.Client.Create(context.Background(), pod); err != nil {
+		if apierrors.IsAlreadyExists(err) {
+			return nil
+		}
+		return err
+	}
+
+	return nil
 }
 
 func (r *Reconciler) unpackBundle(bundle *v1alpha1.Bundle) error {
@@ -229,115 +253,4 @@ func (r *Reconciler) newUnpackJob(pvcName, name, image string) error {
 	}
 
 	return nil
-}
-
-// ReconcileProvisionerClass is responsible for ensuring the specification defined in
-// an individual ProvisionerClass custom resources matches the on-cluster state of
-// the resource. A Bundle custom resource referencing an individual ProvisionerClass'
-// metadata.Name will be managed by the reconciliation loop, ensuring that a volume
-// exists such that arbitrary content specified in a Bundle custom resource and be
-// available for inspection to end-users.
-func (r *Reconciler) ReconcileProvisionerClass(ctx context.Context, req ctrl.Request) (reconcile.Result, error) {
-	// Set up a convenient log object so we don't have to type request over and over again
-	log := r.log.WithValues("request", req)
-	log.V(1).Info("reconciling provisionerclass")
-
-	pc := &v1alpha1.ProvisionerClass{}
-	if err := r.Client.Get(ctx, req.NamespacedName, pc); err != nil {
-		return ctrl.Result{}, client.IgnoreNotFound(err)
-	}
-
-	bundles := &v1alpha1.BundleList{}
-	if err := r.Client.List(ctx, bundles, client.InNamespace(req.Namespace)); err != nil {
-		log.Error(err, "failed to list all the bundles in the req.Namespace")
-		return ctrl.Result{}, err
-	}
-
-	filtered := []*v1alpha1.Bundle{}
-	for _, b := range bundles.Items {
-		if string(b.Spec.Class) != pc.Name {
-			log.Info("provisioner", "found bundle name that does not reference the current provisioner class", b.Name)
-			continue
-		}
-		filtered = append(filtered, &b)
-	}
-	if len(filtered) == 0 {
-		log.Info("no bundles found specifying the current provisionerclass")
-		return ctrl.Result{}, nil
-	}
-
-	var errors []error
-	for _, bundle := range filtered {
-		log.Info("provisioner", "found bundle name that references the current provisionerclass", bundle.Name)
-		if err := r.ensureBundleVolume(ctx, bundle.GetName()); err != nil {
-			errors = append(errors, err)
-		}
-	}
-
-	return ctrl.Result{}, utilerrors.NewAggregate(errors)
-}
-
-// ensureBundleVolume is a helper method responsible for ensuring the bundle's status
-// references an existing volume that will the content stored in the bundle sources'
-// filesystem.
-func (r *Reconciler) ensureBundleVolume(ctx context.Context, bundleName string) error {
-	nn := types.NamespacedName{Name: bundleName}
-	fresh := &v1alpha1.Bundle{}
-	if err := r.Client.Get(ctx, nn, fresh); err != nil {
-		return err
-	}
-
-	if fresh.Status.Volume != nil {
-		// FIXME
-		r.log.Info("volume", "(stub) bundle volume already exists not validating yet", fresh.Name)
-		return nil
-	}
-
-	pvc, err := r.createPVC(fresh.GetName())
-	if err != nil {
-		return err
-	}
-	fresh.Status.Volume = &corev1.LocalObjectReference{
-		Name: pvc.GetName(),
-	}
-
-	r.log.Info("volume", "attempting to update the bundle volume", fresh.GetName(), "with pvc name", pvc.GetName())
-	if err := r.Client.Status().Update(ctx, fresh); err != nil {
-		return err
-	}
-	r.log.Info("volume", "bundle status has been updated to point to a volume created", fresh.GetName())
-
-	return nil
-}
-
-func (r *Reconciler) createPVC(bundleName string) (*corev1.PersistentVolumeClaim, error) {
-	pvcName := fmt.Sprintf("%s-pvc", bundleName)
-	pvc := &corev1.PersistentVolumeClaim{}
-	ctx := context.Background()
-
-	nn := types.NamespacedName{Name: pvcName, Namespace: r.globalNamespace}
-	if err := r.Client.Get(ctx, nn, pvc); err != nil {
-		if !apierrors.IsNotFound(err) {
-			return nil, err
-		}
-
-		pvc.SetName(pvcName)
-		pvc.SetNamespace(r.globalNamespace)
-		volumeMode := corev1.PersistentVolumeFilesystem
-
-		pvc.Spec = corev1.PersistentVolumeClaimSpec{
-			VolumeMode:  &volumeMode,
-			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
-			Resources: corev1.ResourceRequirements{
-				Requests: corev1.ResourceList{
-					corev1.ResourceStorage: apiresource.MustParse("2Gi"),
-				},
-			},
-		}
-		if err := r.Client.Create(ctx, pvc); err != nil {
-			return nil, err
-		}
-	}
-
-	return pvc, nil
 }

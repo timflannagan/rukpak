@@ -23,12 +23,12 @@ spec:
         command:
           - bin/unpacker
         args:
-          - --image {{.BundleImage}}
-          - --manifest-dir /input
-          - --output-dir /new
+          - --image={{.BundleImage}}
+          - --manifest-dir=manifests
+          - --output-dir=/manifests
         imagePullPolicy: Always
         volumeMounts:
-          - mountPath: /input
+          - mountPath: /manifests
             name: manifests
       serviceAccountName: admin
       volumes:

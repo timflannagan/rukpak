@@ -2,9 +2,11 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"os"
 
 	"github.com/operator-framework/rukpak/pkg/k8s/provisioner"
+	"github.com/spf13/cobra"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
@@ -20,14 +22,23 @@ var (
 	setupLog = ctrl.Log.WithName("setup")
 )
 
-const (
-	// TODO: add this as a flag that defaults to the upstream namespace
-	globalNamespace = "rukpak"
-	unpackImage     = "quay.io/tflannag/manifest:unpacker"
-)
-
-// TODO: handle adding a generateName for the bundle unpacking to avoid ifalreadyexists errors during the create call?
 func main() {
+	cmd := &cobra.Command{
+		Use:   "provisioner",
+		Short: "Runs the Rukpak.io provisioner controller(s)",
+		RunE:  run,
+	}
+
+	cmd.Flags().String("namespace", "rukpak", "configures the global namespace that will house the underlying pvc/job resources")
+	cmd.Flags().String("unpack-image", "quay.io/tflannag/manifest:unpacker", "configures the container image used for unpacking arbitrary bundle content")
+
+	if err := cmd.Execute(); err != nil {
+		fmt.Fprint(os.Stderr, err)
+		os.Exit(1)
+	}
+}
+
+func run(cmd *cobra.Command, args []string) error {
 	opts := zap.Options{
 		Development: true,
 	}
@@ -35,41 +46,47 @@ func main() {
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
-		setupLog.Error(err, "failed to add a new scheme")
-		os.Exit(1)
+		return fmt.Errorf("failed to initialize the schema(s): %v", err)
+	}
+
+	namespace, err := cmd.Flags().GetString("namespace")
+	if err != nil {
+		return err
+	}
+	unpackImage, err := cmd.Flags().GetString("unpack-image")
+	if err != nil {
+		return err
 	}
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), manager.Options{
 		Scheme:    scheme,
-		Namespace: globalNamespace,
+		Namespace: namespace,
 	})
 	if err != nil {
-		setupLog.Error(err, "failed to setup manager instance")
-		os.Exit(1)
+		return fmt.Errorf("failed to setup manager instance: %v", err)
 	}
 
+	// TODO(tflannag): Use the options pattern?
 	r, err := provisioner.NewReconciler(
 		mgr.GetClient(),
 		setupLog,
 		scheme,
-		globalNamespace,
+		namespace,
 		unpackImage,
 	)
 	if err != nil {
-		setupLog.Error(err, "failed to create a new reconciler")
-		os.Exit(1)
+		return fmt.Errorf("failed to create a new reconciler instance: %v", err)
 	}
 
 	if err := r.SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "failed to attach the provisioner controllers to the manager instance")
-		os.Exit(1)
+		return fmt.Errorf("failed to attach the provisioner controllers to the manager instance: %v", err)
 	}
 
 	// +kubebuilder:scaffold:builder
 	setupLog.Info("starting manager")
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
-		setupLog.Error(err, "problem running manager")
-		os.Exit(1)
+		return fmt.Errorf("problem running the manager: %v", err)
 	}
 	setupLog.Info("exiting manager")
+	return nil
 }
