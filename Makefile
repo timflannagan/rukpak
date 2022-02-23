@@ -62,8 +62,10 @@ GO_BUILD := $(Q)go build
 
 build: bin/k8s bin/kuberpak
 
+.PHONY: bin/k8s
 bin/k8s:
 	$(GO_BUILD) -o $@ ./provisioner/k8s
 
+.PHONY: bin/kuberpak
 bin/kuberpak:
 	$(GO_BUILD) -o $@ ./provisioner/kuberpak
