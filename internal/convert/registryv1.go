@@ -251,6 +251,15 @@ func Convert(in RegistryV1, installNamespace string, targetNamespaces []string) 
 	return &Plain{Objects: objs}, nil
 }
 
+func GetDesiredObjects(reg RegistryV1, installNamespace string, watchNamespaces []string) ([]client.Object, error) {
+	reg.CSV.Namespace = installNamespace
+	plain, err := Convert(reg, installNamespace, watchNamespaces)
+	if err != nil {
+		return nil, err
+	}
+	return append(plain.Objects, &reg.CSV), nil
+}
+
 const maxNameLength = 63
 
 func generateName(base string, o interface{}) string {

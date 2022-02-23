@@ -23,16 +23,12 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/go-logr/logr"
 	v1 "github.com/operator-framework/api/pkg/operators/v1"
 	"github.com/operator-framework/api/pkg/operators/v1alpha1"
 	helmclient "github.com/operator-framework/helm-operator-plugins/pkg/client"
 	"helm.sh/helm/v3/pkg/action"
 	"helm.sh/helm/v3/pkg/chart"
-	"helm.sh/helm/v3/pkg/release"
-	"helm.sh/helm/v3/pkg/storage/driver"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -45,15 +41,15 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
-	"sigs.k8s.io/controller-runtime/pkg/predicate"
-	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 	"sigs.k8s.io/yaml"
 
 	olmv1alpha1 "github.com/operator-framework/rukpak/api/v1alpha1"
 	"github.com/operator-framework/rukpak/internal/convert"
+	"github.com/operator-framework/rukpak/internal/helm"
 	helmpredicate "github.com/operator-framework/rukpak/internal/helm-operator-plugins/predicate"
 	"github.com/operator-framework/rukpak/internal/storage"
+	"github.com/operator-framework/rukpak/internal/util"
 )
 
 // BundleInstanceReconciler reconciles a BundleInstance object
@@ -93,10 +89,7 @@ func (r *BundleInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 	bi := &olmv1alpha1.BundleInstance{}
 	if err := r.Get(ctx, req.NamespacedName, bi); err != nil {
-		if apierrors.IsNotFound(err) {
-			return ctrl.Result{}, nil
-		}
-		return ctrl.Result{}, err
+		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	defer func() {
 		bi := bi.DeepCopy()
@@ -168,7 +161,7 @@ func (r *BundleInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		})
 		return ctrl.Result{}, err
 	}
-	desiredObjects, err := r.getDesiredObjects(*reg, installNamespace, og.Status.Namespaces)
+	desiredObjects, err := convert.GetDesiredObjects(*reg, installNamespace, og.Status.Namespaces)
 	if err != nil {
 		meta.SetStatusCondition(&bi.Status.Conditions, metav1.Condition{
 			Type:    "Installed",
@@ -213,7 +206,7 @@ func (r *BundleInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, err
 	}
 
-	rel, state, err := r.getReleaseState(cl, bi, chrt)
+	rel, state, err := helm.GetReleaseState(cl, bi, chrt, r.ReleaseNamespace)
 	if err != nil {
 		meta.SetStatusCondition(&bi.Status.Conditions, metav1.Condition{
 			Type:    "Installed",
@@ -225,7 +218,7 @@ func (r *BundleInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	}
 
 	switch state {
-	case stateNeedsInstall:
+	case helm.StateNeedsInstall:
 		_, err = cl.Install(bi.Name, r.ReleaseNamespace, chrt, nil, func(install *action.Install) error {
 			install.CreateNamespace = false
 			return nil
@@ -239,7 +232,7 @@ func (r *BundleInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			})
 			return ctrl.Result{}, err
 		}
-	case stateNeedsUpgrade:
+	case helm.StateNeedsUpgrade:
 		_, err = cl.Upgrade(bi.Name, r.ReleaseNamespace, chrt, nil)
 		if err != nil {
 			meta.SetStatusCondition(&bi.Status.Conditions, metav1.Condition{
@@ -250,7 +243,7 @@ func (r *BundleInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			})
 			return ctrl.Result{}, err
 		}
-	case stateUnchanged:
+	case helm.StateUnchanged:
 		if err := cl.Reconcile(rel); err != nil {
 			meta.SetStatusCondition(&bi.Status.Conditions, metav1.Condition{
 				Type:    "Installed",
@@ -311,15 +304,6 @@ func (r *BundleInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	return ctrl.Result{}, nil
 }
 
-type releaseState string
-
-const (
-	stateNeedsInstall releaseState = "NeedsInstall"
-	stateNeedsUpgrade releaseState = "NeedsUpgrade"
-	stateUnchanged    releaseState = "Unchanged"
-	stateError        releaseState = "Error"
-)
-
 func (r *BundleInstanceReconciler) getOperatorGroup(ctx context.Context, installNamespace string) (*v1.OperatorGroup, error) {
 	ogs := v1.OperatorGroupList{}
 	if err := r.List(ctx, &ogs, client.InNamespace(installNamespace)); err != nil {
@@ -333,29 +317,6 @@ func (r *BundleInstanceReconciler) getOperatorGroup(ctx context.Context, install
 	default:
 		return nil, fmt.Errorf("multiple operator groups found in install namespace")
 	}
-}
-
-func (r *BundleInstanceReconciler) getReleaseState(cl helmclient.ActionInterface, obj metav1.Object, chrt *chart.Chart) (*release.Release, releaseState, error) {
-	currentRelease, err := cl.Get(obj.GetName())
-	if err != nil && !errors.Is(err, driver.ErrReleaseNotFound) {
-		return nil, stateError, err
-	}
-	if errors.Is(err, driver.ErrReleaseNotFound) {
-		return nil, stateNeedsInstall, nil
-	}
-	desiredRelease, err := cl.Upgrade(obj.GetName(), r.ReleaseNamespace, chrt, nil, func(upgrade *action.Upgrade) error {
-		upgrade.DryRun = true
-		return nil
-	})
-	if err != nil {
-		return currentRelease, stateError, err
-	}
-	if desiredRelease.Manifest != currentRelease.Manifest ||
-		currentRelease.Info.Status == release.StatusFailed ||
-		currentRelease.Info.Status == release.StatusSuperseded {
-		return currentRelease, stateNeedsUpgrade, nil
-	}
-	return currentRelease, stateUnchanged, nil
 }
 
 type errBundleNotUnpacked struct {
@@ -410,22 +371,13 @@ func (r *BundleInstanceReconciler) loadBundle(ctx context.Context, bi *olmv1alph
 	return &reg, nil
 }
 
-func (r *BundleInstanceReconciler) getDesiredObjects(reg convert.RegistryV1, installNamespace string, watchNamespaces []string) ([]client.Object, error) {
-	reg.CSV.Namespace = installNamespace
-	plain, err := convert.Convert(reg, installNamespace, watchNamespaces)
-	if err != nil {
-		return nil, err
-	}
-	return append(plain.Objects, &reg.CSV), nil
-}
-
 // SetupWithManager sets up the controller with the Manager.
 func (r *BundleInstanceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	//r.ActionConfigGetter = helmclient.NewActionConfigGetter(mgr.GetConfig(), mgr.GetRESTMapper(), mgr.GetLogger())
 	//r.ActionClientGetter = helmclient.NewActionClientGetter(r.ActionConfigGetter)
 	controller, err := ctrl.NewControllerManagedBy(mgr).
-		For(&olmv1alpha1.BundleInstance{}, builder.WithPredicates(bundleInstanceProvisionerFilter("kuberpak.io/registry+v1"))).
-		Watches(&source.Kind{Type: &olmv1alpha1.Bundle{}}, handler.EnqueueRequestsFromMapFunc(mapBundleToBundleInstanceHandler(mgr.GetClient(), mgr.GetLogger()))).
+		For(&olmv1alpha1.BundleInstance{}, builder.WithPredicates(util.BundleInstanceProvisionerFilter("kuberpak.io/registry+v1"))).
+		Watches(&source.Kind{Type: &olmv1alpha1.Bundle{}}, handler.EnqueueRequestsFromMapFunc(util.MapBundleToBundleInstanceHandler(mgr.GetClient(), mgr.GetLogger()))).
 		Build(r)
 	if err != nil {
 		return err
@@ -433,30 +385,4 @@ func (r *BundleInstanceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	r.Controller = controller
 	r.dynamicWatchGVKs = map[schema.GroupVersionKind]struct{}{}
 	return nil
-}
-
-func bundleInstanceProvisionerFilter(provisionerClassName string) predicate.Predicate {
-	return predicate.NewPredicateFuncs(func(obj client.Object) bool {
-		b := obj.(*olmv1alpha1.BundleInstance)
-		return b.Spec.ProvisionerClassName == provisionerClassName
-	})
-}
-
-func mapBundleToBundleInstanceHandler(cl client.Client, log logr.Logger) handler.MapFunc {
-	return func(object client.Object) []reconcile.Request {
-		b := object.(*olmv1alpha1.Bundle)
-		bundleInstances := &olmv1alpha1.BundleInstanceList{}
-		var requests []reconcile.Request
-		if err := cl.List(context.Background(), bundleInstances); err != nil {
-			log.WithName("mapBundleToBundleInstanceHandler").Error(err, "list bundles")
-			return requests
-		}
-		for _, bi := range bundleInstances.Items {
-			bi := bi
-			if bi.Spec.BundleName == b.Name {
-				requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&bi)})
-			}
-		}
-		return requests
-	}
 }
