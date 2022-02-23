@@ -84,6 +84,7 @@ func main() {
 		os.Exit(1)
 	}
 	// TODO(tflannag): Make this a constant and rename to be match the same core.rukpak.io domain name
+	// - This is somewhat awkward right now as internal packages also reference this label
 	dependentRequirement, err := labels.NewRequirement("kuberpak.io/owner-name", selection.Exists, nil)
 	if err != nil {
 		setupLog.Error(err, "unable to create dependent label selector for cache")
@@ -96,8 +97,7 @@ func main() {
 		Port:                   9443,
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
-		// TODO(tflannag): Rename this to match the same core.rukpak.io domain
-		LeaderElectionID: "510f803c.olm.operatorframework.io",
+		LeaderElectionID:       "510f803c.core.rukpak.io",
 		NewCache: cache.BuilderWithOptions(cache.Options{
 			SelectorsByObject: cache.SelectorsByObject{
 				&olmv1alpha1.BundleInstance{}: {},

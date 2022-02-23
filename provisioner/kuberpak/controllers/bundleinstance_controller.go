@@ -52,6 +52,10 @@ import (
 	"github.com/operator-framework/rukpak/internal/util"
 )
 
+const (
+	kuberpakOwnerLabel = "kuberpak.io/owner-name"
+)
+
 // BundleInstanceReconciler reconciles a BundleInstance object
 type BundleInstanceReconciler struct {
 	client.Client
@@ -75,10 +79,6 @@ type BundleInstanceReconciler struct {
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
-// TODO(user): Modify the Reconcile function to compare the state specified by
-// the BundleInstance object against the actual cluster state, and then
-// perform operations to make the cluster state reflect the state specified by
-// the user.
 //
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.9.2/pkg/reconcile
@@ -87,6 +87,8 @@ func (r *BundleInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	l.V(1).Info("starting reconciliation")
 	defer l.V(1).Info("ending reconciliation")
 
+	// Note(tflannag): We've reached the complexity threshold for this
+	// Reconcile implementation.
 	bi := &olmv1alpha1.BundleInstance{}
 	if err := r.Get(ctx, req.NamespacedName, bi); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
@@ -94,7 +96,7 @@ func (r *BundleInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	defer func() {
 		bi := bi.DeepCopy()
 		bi.ObjectMeta.ManagedFields = nil
-		if err := r.Status().Patch(ctx, bi, client.Apply, client.FieldOwner("kuberpak.io/registry+v1")); err != nil {
+		if err := r.Status().Patch(ctx, bi, client.Apply, client.FieldOwner(registryV1ProvisionerID)); err != nil {
 			l.Error(err, "failed to patch status")
 		}
 	}()
@@ -349,7 +351,7 @@ func (r *BundleInstanceReconciler) loadBundle(ctx context.Context, bi *olmv1alph
 	for _, obj := range objects {
 		obj := obj
 		obj.SetLabels(map[string]string{
-			"kuberpak.io/owner-name": bi.Name,
+			kuberpakOwnerLabel: bi.Name,
 		})
 		switch obj.GetObjectKind().GroupVersionKind().Kind {
 		case "ClusterServiceVersion":
@@ -373,10 +375,8 @@ func (r *BundleInstanceReconciler) loadBundle(ctx context.Context, bi *olmv1alph
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *BundleInstanceReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	//r.ActionConfigGetter = helmclient.NewActionConfigGetter(mgr.GetConfig(), mgr.GetRESTMapper(), mgr.GetLogger())
-	//r.ActionClientGetter = helmclient.NewActionClientGetter(r.ActionConfigGetter)
 	controller, err := ctrl.NewControllerManagedBy(mgr).
-		For(&olmv1alpha1.BundleInstance{}, builder.WithPredicates(util.BundleInstanceProvisionerFilter("kuberpak.io/registry+v1"))).
+		For(&olmv1alpha1.BundleInstance{}, builder.WithPredicates(util.BundleInstanceProvisionerFilter(registryV1ProvisionerID))).
 		Watches(&source.Kind{Type: &olmv1alpha1.Bundle{}}, handler.EnqueueRequestsFromMapFunc(util.MapBundleToBundleInstanceHandler(mgr.GetClient(), mgr.GetLogger()))).
 		Build(r)
 	if err != nil {

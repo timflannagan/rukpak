@@ -35,6 +35,10 @@ import (
 	"github.com/operator-framework/rukpak/internal/util"
 )
 
+const (
+	registryV1ProvisionerID = "kuberpak.io/registry+v1"
+)
+
 // BundleReconciler reconciles a Bundle object
 type BundleReconciler struct {
 	client.Client
@@ -92,7 +96,7 @@ func (r *BundleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ c
 func (r *BundleReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&olmv1alpha1.Bundle{}, builder.WithPredicates(
-			util.BundleProvisionerFilter("kuberpak.io/registry+v1"),
+			util.BundleProvisionerFilter(registryV1ProvisionerID),
 		)).
 		Owns(&corev1.Secret{}).
 		Owns(&corev1.Pod{}).
