@@ -133,12 +133,11 @@ func main() {
 	}
 
 	if err = (&controllers.BundleReconciler{
-		Client:       mgr.GetClient(),
-		KubeClient:   kubeClient,
-		Scheme:       mgr.GetScheme(),
-		PodNamespace: ns,
-		Storage:      bundleStorage,
-		Unpacker:     unpacker,
+		Client:     mgr.GetClient(),
+		KubeClient: kubeClient,
+		Scheme:     mgr.GetScheme(),
+		Storage:    bundleStorage,
+		Unpacker:   unpacker,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Bundle")
 		os.Exit(1)

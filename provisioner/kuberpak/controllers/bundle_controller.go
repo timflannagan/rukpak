@@ -42,8 +42,6 @@ type BundleReconciler struct {
 	Scheme     *runtime.Scheme
 	Storage    storage.Storage
 	Unpacker   unpacker.Unpacker
-
-	PodNamespace string
 }
 
 //+kubebuilder:rbac:groups=olm.operatorframework.io,resources=bundles,verbs=get;list;watch;create;update;patch;delete
