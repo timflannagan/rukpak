@@ -22,8 +22,15 @@ jobs:
     steps:
       - uses: actions/checkout@v2
       - name: Build the container image
+        # TODO(tflannag): Migrate both of these to use the v2 version
         uses: docker/build-push-action@v1
         with:
           repository: operator-framework/rukpak
           dockerfile: ./Dockerfile
+          push: false
+      - name: Build the container image
+        uses: docker/build-push-action@v1
+        with:
+          repository: operator-framework/rukpak
+          dockerfile: ./unpack.Dockerfile
           push: false
