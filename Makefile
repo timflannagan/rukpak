@@ -19,15 +19,12 @@ help: ## Show this help screen
 	@awk 'BEGIN {FS = ":.*##"; printf "\nUsage:\n  make \033[36m<target>\033[0m\n"} /^[a-zA-Z0-9_-]+:.*?##/ { printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2 } /^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5) } ' $(MAKEFILE_LIST)
 
 # Code management
-.PHONY: lint format tidy clean generate
+.PHONY: lint tidy clean generate
 
 PKGS = $(shell go list ./...)
 
 lint:
 	$(Q)go run github.com/golangci/golangci-lint/cmd/golangci-lint run
-
-format: ## Format the source code
-	$(Q)go fmt ./...
 
 tidy: ## Update dependencies
 	$(Q)go mod tidy
@@ -38,7 +35,7 @@ generate: ## Generate code and manifests
 	$(Q)go generate ./...
 
 # Static tests.
-.PHONY: test test-unit verify build bin/k8s
+.PHONY: test test-unit verify build
 
 test: test-unit test-e2e ## Run the tests
 
@@ -49,7 +46,7 @@ test-unit: ## Run the unit tests
 test-e2e: ## Run the e2e tests
 	go run "github.com/onsi/ginkgo/ginkgo" run test/e2e
 
-verify: tidy generate format ## Verify the current code generation and lint
+verify: tidy generate ## Verify the current code generation and lint
 	git diff --exit-code
 
 install: generate
