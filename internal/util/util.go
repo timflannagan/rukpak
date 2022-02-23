@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io/ioutil"
 	"reflect"
 	"time"
 
@@ -52,6 +53,14 @@ func MapBundleToBundleInstanceHandler(cl client.Client, log logr.Logger) handler
 		}
 		return requests
 	}
+}
+
+func PodNamespace(defaultNamespace string) string {
+	namespace, err := ioutil.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
+	if err != nil {
+		return defaultNamespace
+	}
+	return string(namespace)
 }
 
 func PodName(bundleName string) string {

@@ -38,6 +38,7 @@ import (
 	olmv1alpha1 "github.com/operator-framework/rukpak/api/v1alpha1"
 	"github.com/operator-framework/rukpak/internal/storage"
 	"github.com/operator-framework/rukpak/internal/unpacker"
+	"github.com/operator-framework/rukpak/internal/util"
 	"github.com/operator-framework/rukpak/provisioner/kuberpak/controllers"
 )
 
@@ -113,9 +114,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	// TODO(tflannag): Make this a helper function
-	// TODO: derive pod namespace from the pod that this process is running in.
-	ns := "kuberpak-system"
+	ns := util.PodNamespace("kuberpak-system")
 
 	// TODO(tflannag): This should be configurable through the CLI?
 	bundleStorage := &storage.ConfigMaps{
