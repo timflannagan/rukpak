@@ -44,9 +44,9 @@ import (
 	"sigs.k8s.io/yaml"
 
 	olmv1alpha1 "github.com/operator-framework/rukpak/api/v1alpha1"
-	"github.com/operator-framework/rukpak/provisioner/kuberpak/internal/storage"
-	"github.com/operator-framework/rukpak/provisioner/kuberpak/internal/updater"
-	"github.com/operator-framework/rukpak/provisioner/kuberpak/internal/util"
+	"github.com/operator-framework/rukpak/internal/storage"
+	"github.com/operator-framework/rukpak/internal/updater"
+	"github.com/operator-framework/rukpak/internal/util"
 )
 
 // BundleReconciler reconciles a Bundle object
