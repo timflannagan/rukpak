@@ -77,6 +77,7 @@ func main() {
 		setupLog.Error(err, "unable to create kubernetes client")
 		os.Exit(1)
 	}
+	// TODO(tflannag): Make this a constant and rename to be match the same core.rukpak.io domain name
 	dependentRequirement, err := labels.NewRequirement("kuberpak.io/owner-name", selection.Exists, nil)
 	if err != nil {
 		setupLog.Error(err, "unable to create dependent label selector for cache")
@@ -89,13 +90,13 @@ func main() {
 		Port:                   9443,
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
-		LeaderElectionID:       "510f803c.olm.operatorframework.io",
+		// TODO(tflannag): Rename this to match the same core.rukpak.io domain
+		LeaderElectionID: "510f803c.olm.operatorframework.io",
 		NewCache: cache.BuilderWithOptions(cache.Options{
 			SelectorsByObject: cache.SelectorsByObject{
 				&olmv1alpha1.BundleInstance{}: {},
 				&olmv1alpha1.Bundle{}:         {},
 				&v1.OperatorGroup{}:           {},
-				//&corev1.Namespace{}:           {},
 			},
 			DefaultSelector: cache.ObjectSelector{
 				Label: dependentSelector,
@@ -107,9 +108,11 @@ func main() {
 		os.Exit(1)
 	}
 
+	// TODO(tflannag): Make this a helper function
 	// TODO: derive pod namespace from the pod that this process is running in.
 	ns := "kuberpak-system"
 
+	// TODO(tflannag): This should be configurable through the CLI?
 	bundleStorage := &storage.ConfigMaps{
 		Client:     mgr.GetClient(),
 		Namespace:  ns,
@@ -122,12 +125,15 @@ func main() {
 		Scheme:       mgr.GetScheme(),
 		PodNamespace: ns,
 		Storage:      bundleStorage,
-		UnpackImage:  "quay.io/joelanford/kuberpak-unpack:v0.1.0",
+		// TODO(tflannag): This should be a CLI option
+		UnpackImage: "quay.io/joelanford/kuberpak-unpack:v0.1.0",
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Bundle")
 		os.Exit(1)
 	}
 
+	// TODO(tflannag): Figure out the issue with helm history and existing resources
+	// e.g. there's owner ref issues
 	cfgGetter := helmclient.NewActionConfigGetter(mgr.GetConfig(), mgr.GetRESTMapper(), mgr.GetLogger())
 	if err = (&controllers.BundleInstanceReconciler{
 		Client:             mgr.GetClient(),
