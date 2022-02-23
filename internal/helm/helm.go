@@ -11,16 +11,16 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-type releaseState string
+type ReleaseState string
 
 const (
-	StateNeedsInstall releaseState = "NeedsInstall"
-	StateNeedsUpgrade releaseState = "NeedsUpgrade"
-	StateUnchanged    releaseState = "Unchanged"
-	StateError        releaseState = "Error"
+	StateNeedsInstall ReleaseState = "NeedsInstall"
+	StateNeedsUpgrade ReleaseState = "NeedsUpgrade"
+	StateUnchanged    ReleaseState = "Unchanged"
+	StateError        ReleaseState = "Error"
 )
 
-func GetReleaseState(cl helmclient.ActionInterface, obj metav1.Object, chrt *chart.Chart, namespace string) (*release.Release, releaseState, error) {
+func GetReleaseState(cl helmclient.ActionInterface, obj metav1.Object, chrt *chart.Chart, namespace string) (*release.Release, ReleaseState, error) {
 	currentRelease, err := cl.Get(obj.GetName())
 	if err != nil && !errors.Is(err, driver.ErrReleaseNotFound) {
 		return nil, StateError, err

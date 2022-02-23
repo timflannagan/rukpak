@@ -204,7 +204,7 @@ func getObjects(bundleFS fs.FS) ([]client.Object, error) {
 	return objects, nil
 }
 
-func getBundleContents(ctx context.Context, contents []byte) (fs.FS, error) {
+func getBundleContents(_ context.Context, contents []byte) (fs.FS, error) {
 	decoder := json.NewDecoder(bytes.NewReader(contents))
 	bundleContents := map[string][]byte{}
 	if err := decoder.Decode(&bundleContents); err != nil {
