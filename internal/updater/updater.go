@@ -120,3 +120,29 @@ func SetPhase(phase string) UpdateStatusFunc {
 		return true
 	}
 }
+
+func UpdateStatusUnpackPending(u *Updater) {
+	u.UpdateStatus(
+		SetBundleInfo(nil),
+		EnsureBundleDigest(""),
+		SetPhase(olmv1alpha1.PhasePending),
+		EnsureCondition(metav1.Condition{
+			Type:   olmv1alpha1.TypeUnpacked,
+			Status: metav1.ConditionFalse,
+			Reason: olmv1alpha1.ReasonUnpackPending,
+		}),
+	)
+}
+
+func UpdateStatusUnpackFailing(u *Updater, err error) error {
+	u.UpdateStatus(
+		SetPhase(olmv1alpha1.PhaseFailing),
+		EnsureCondition(metav1.Condition{
+			Type:    olmv1alpha1.TypeUnpacked,
+			Status:  metav1.ConditionFalse,
+			Reason:  olmv1alpha1.ReasonUnpackFailed,
+			Message: err.Error(),
+		}),
+	)
+	return err
+}

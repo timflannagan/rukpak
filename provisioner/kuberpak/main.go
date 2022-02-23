@@ -37,7 +37,12 @@ import (
 
 	olmv1alpha1 "github.com/operator-framework/rukpak/api/v1alpha1"
 	"github.com/operator-framework/rukpak/internal/storage"
+	"github.com/operator-framework/rukpak/internal/unpacker"
 	"github.com/operator-framework/rukpak/provisioner/kuberpak/controllers"
+)
+
+const (
+	unpackImage = "quay.io/joelanford/kuberpak-unpack:v0.1.0"
 )
 
 var (
@@ -118,6 +123,14 @@ func main() {
 		Namespace:  ns,
 		NamePrefix: "bundle-",
 	}
+	// TODO(tflannag): This needs to be initialized in the main.go
+	// Only problem is with injecting the updater.Updater as we create that here
+	unpacker := &unpacker.PodBundleUnpacker{
+		Client:       mgr.GetClient(),
+		KubeClient:   kubeClient,
+		PodNamespace: ns,
+		UnpackImage:  unpackImage,
+	}
 
 	if err = (&controllers.BundleReconciler{
 		Client:       mgr.GetClient(),
@@ -125,8 +138,7 @@ func main() {
 		Scheme:       mgr.GetScheme(),
 		PodNamespace: ns,
 		Storage:      bundleStorage,
-		// TODO(tflannag): This should be a CLI option
-		UnpackImage: "quay.io/joelanford/kuberpak-unpack:v0.1.0",
+		Unpacker:     unpacker,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Bundle")
 		os.Exit(1)

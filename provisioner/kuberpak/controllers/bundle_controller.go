@@ -17,36 +17,22 @@ limitations under the License.
 package controllers
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
-	"io/fs"
-	"path/filepath"
-	"strings"
-	"testing/fstest"
 
-	"github.com/operator-framework/operator-registry/pkg/registry"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
-	apimachyaml "k8s.io/apimachinery/pkg/util/yaml"
 	"k8s.io/client-go/kubernetes"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
-	"sigs.k8s.io/yaml"
 
 	olmv1alpha1 "github.com/operator-framework/rukpak/api/v1alpha1"
 	"github.com/operator-framework/rukpak/internal/storage"
+	"github.com/operator-framework/rukpak/internal/unpacker"
 	"github.com/operator-framework/rukpak/internal/updater"
-	"github.com/operator-framework/rukpak/internal/util"
 )
 
 // BundleReconciler reconciles a Bundle object
@@ -55,29 +41,9 @@ type BundleReconciler struct {
 	KubeClient kubernetes.Interface
 	Scheme     *runtime.Scheme
 	Storage    storage.Storage
+	Unpacker   unpacker.Unpacker
 
 	PodNamespace string
-	UnpackImage  string
-}
-
-type UnpackResult struct {
-	objects     []client.Object
-	imageDigest string
-	annotations *registry.Annotations
-}
-
-type Unpacker interface {
-	UnpackBundle(context.Context, *olmv1alpha1.Bundle) (*UnpackResult, error)
-}
-
-var _ Unpacker = &PodBundleUnpacker{}
-
-type PodBundleUnpacker struct {
-	client       client.Client
-	kubeClient   kubernetes.Interface
-	updater      updater.Updater
-	podNamespace string
-	unpackImage  string
 }
 
 //+kubebuilder:rbac:groups=olm.operatorframework.io,resources=bundles,verbs=get;list;watch;create;update;patch;delete
@@ -108,347 +74,20 @@ func (r *BundleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (_ c
 	}()
 	u.UpdateStatus(updater.EnsureObservedGeneration(bundle.Generation))
 
-	unpacker := PodBundleUnpacker{
-		client:       r.Client,
-		kubeClient:   r.KubeClient,
-		updater:      u,
-		podNamespace: r.PodNamespace,
-		unpackImage:  r.UnpackImage,
-	}
-	res, err := unpacker.UnpackBundle(ctx, bundle)
+	res, err := r.Unpacker.UnpackBundle(ctx, bundle)
 	if err != nil {
 		u.UpdateStatus(updater.SetBundleInfo(nil), updater.EnsureBundleDigest(""))
-		return ctrl.Result{}, updateStatusUnpackFailing(&u, fmt.Errorf("ensure unpack pod: %w", err))
+		return ctrl.Result{}, updater.UpdateStatusUnpackFailing(&u, fmt.Errorf("ensure unpack pod: %w", err))
 	}
 	if res == nil {
-		return ctrl.Result{}, updateStatusUnpackFailing(&u, fmt.Errorf("empty unpack result"))
+		return ctrl.Result{}, updater.UpdateStatusUnpackFailing(&u, fmt.Errorf("empty unpack result"))
 	}
 
-	if err := r.Storage.Store(ctx, bundle, res.objects); err != nil {
-		return ctrl.Result{}, updateStatusUnpackFailing(&u, fmt.Errorf("persist bundle objects: %w", err))
+	if err := r.Storage.Store(ctx, bundle, res.Objects); err != nil {
+		return ctrl.Result{}, updater.UpdateStatusUnpackFailing(&u, fmt.Errorf("persist bundle objects: %w", err))
 	}
 
 	return ctrl.Result{}, nil
-}
-
-func (u *PodBundleUnpacker) UnpackBundle(ctx context.Context, bundle *olmv1alpha1.Bundle) (*UnpackResult, error) {
-	pod := &corev1.Pod{}
-	op, err := u.ensureUnpackPodCRIO(ctx, bundle, pod)
-	if err != nil {
-		u.updater.UpdateStatus(updater.SetBundleInfo(nil), updater.EnsureBundleDigest(""))
-		return nil, updateStatusUnpackFailing(&u.updater, fmt.Errorf("ensure unpack pod: %w", err))
-	}
-	if op == controllerutil.OperationResultCreated || op == controllerutil.OperationResultUpdated || pod.DeletionTimestamp != nil {
-		updateStatusUnpackPending(&u.updater)
-		return nil, nil
-	}
-
-	switch phase := pod.Status.Phase; phase {
-	case corev1.PodPending:
-		handlePendingPod(&u.updater, pod)
-		return nil, nil
-	case corev1.PodRunning:
-		handleRunningPod(&u.updater)
-		return nil, nil
-	case corev1.PodFailed:
-		return nil, u.handleFailedPod(ctx, pod)
-	case corev1.PodSucceeded:
-		res, err := u.handleCompletedPod(ctx, bundle, pod)
-		if err != nil {
-			return nil, err
-		}
-
-		var info *olmv1alpha1.BundleInfo
-		if res.annotations != nil {
-			info = &olmv1alpha1.BundleInfo{Package: res.annotations.PackageName}
-		}
-		for _, obj := range res.objects {
-			if obj.GetObjectKind().GroupVersionKind().Kind == "ClusterServiceVersion" {
-				info.Name = obj.GetName()
-				u := obj.(*unstructured.Unstructured)
-				info.Version, _, _ = unstructured.NestedString(u.Object, "spec", "version")
-			}
-			gvk := obj.GetObjectKind().GroupVersionKind()
-			info.Objects = append(info.Objects, olmv1alpha1.BundleObject{
-				Group:     gvk.Group,
-				Version:   gvk.Version,
-				Kind:      gvk.Kind,
-				Name:      obj.GetName(),
-				Namespace: obj.GetNamespace(),
-			})
-		}
-
-		u.updater.UpdateStatus(
-			updater.SetBundleInfo(info),
-			updater.EnsureBundleDigest(res.imageDigest),
-			updater.SetPhase(olmv1alpha1.PhaseUnpacked),
-			updater.EnsureCondition(metav1.Condition{
-				Type:   olmv1alpha1.TypeUnpacked,
-				Status: metav1.ConditionTrue,
-				Reason: olmv1alpha1.ReasonUnpackSuccessful,
-			}),
-		)
-		return &UnpackResult{objects: res.objects}, nil
-	default:
-		return nil, handleUnexpectedPod(ctx, u.client, &u.updater, pod)
-	}
-}
-
-func handleUnexpectedPod(ctx context.Context, c client.Client, u *updater.Updater, pod *corev1.Pod) error {
-	err := fmt.Errorf("unexpected pod phase: %v", pod.Status.Phase)
-	_ = c.Delete(ctx, pod)
-	return updateStatusUnpackFailing(u, err)
-}
-
-func handlePendingPod(u *updater.Updater, pod *corev1.Pod) {
-	var messages []string
-	for _, cStatus := range append(pod.Status.InitContainerStatuses, pod.Status.ContainerStatuses...) {
-		if cStatus.State.Waiting != nil && cStatus.State.Waiting.Reason == "ErrImagePull" {
-			messages = append(messages, cStatus.State.Waiting.Message)
-		}
-		if cStatus.State.Waiting != nil && cStatus.State.Waiting.Reason == "ImagePullBackoff" {
-			messages = append(messages, cStatus.State.Waiting.Message)
-		}
-	}
-	u.UpdateStatus(
-		updater.SetBundleInfo(nil),
-		updater.EnsureBundleDigest(""),
-		updater.SetPhase(olmv1alpha1.PhasePending),
-		updater.EnsureCondition(metav1.Condition{
-			Type:    olmv1alpha1.TypeUnpacked,
-			Status:  metav1.ConditionFalse,
-			Reason:  olmv1alpha1.ReasonUnpackPending,
-			Message: strings.Join(messages, "; "),
-		}),
-	)
-}
-
-func handleRunningPod(u *updater.Updater) {
-	u.UpdateStatus(
-		updater.SetBundleInfo(nil),
-		updater.EnsureBundleDigest(""),
-		updater.SetPhase(olmv1alpha1.PhaseUnpacking),
-		updater.EnsureCondition(metav1.Condition{
-			Type:   olmv1alpha1.TypeUnpacked,
-			Status: metav1.ConditionFalse,
-			Reason: olmv1alpha1.ReasonUnpacking,
-		}),
-	)
-}
-
-func (u *PodBundleUnpacker) handleFailedPod(ctx context.Context, pod *corev1.Pod) error {
-	u.updater.UpdateStatus(
-		updater.SetBundleInfo(nil),
-		updater.EnsureBundleDigest(""),
-		updater.SetPhase(olmv1alpha1.PhaseFailing),
-	)
-	logs, err := getPodLogs(ctx, u.kubeClient, pod)
-	if err != nil {
-		err = fmt.Errorf("unpack failed: failed to retrieve failed pod logs: %w", err)
-		u.updater.UpdateStatus(
-			updater.EnsureCondition(metav1.Condition{
-				Type:    olmv1alpha1.TypeUnpacked,
-				Status:  metav1.ConditionFalse,
-				Reason:  olmv1alpha1.ReasonUnpackFailed,
-				Message: err.Error(),
-			}),
-		)
-		return err
-	}
-	logStr := string(logs)
-	u.updater.UpdateStatus(
-		updater.EnsureCondition(metav1.Condition{
-			Type:    olmv1alpha1.TypeUnpacked,
-			Status:  metav1.ConditionFalse,
-			Reason:  olmv1alpha1.ReasonUnpackFailed,
-			Message: logStr,
-		}),
-	)
-	_ = u.client.Delete(ctx, pod)
-	return fmt.Errorf("unpack failed: %v", logStr)
-}
-
-func (u *PodBundleUnpacker) ensureUnpackPodCRIO(ctx context.Context, bundle *olmv1alpha1.Bundle, pod *corev1.Pod) (controllerutil.OperationResult, error) {
-	controllerRef := metav1.NewControllerRef(bundle, bundle.GroupVersionKind())
-	automountServiceAccountToken := false
-	pod.SetName(util.PodName(bundle.Name))
-	pod.SetNamespace(u.podNamespace)
-
-	return util.CreateOrRecreate(ctx, u.client, pod, func() error {
-		pod.SetLabels(map[string]string{"kuberpak.io/owner-name": bundle.Name})
-		pod.SetOwnerReferences([]metav1.OwnerReference{*controllerRef})
-		pod.Spec.AutomountServiceAccountToken = &automountServiceAccountToken
-		pod.Spec.Volumes = []corev1.Volume{
-			{Name: "util", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
-			{Name: "bundle", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
-		}
-		pod.Spec.RestartPolicy = corev1.RestartPolicyNever
-		if len(pod.Spec.InitContainers) != 2 {
-			pod.Spec.InitContainers = make([]corev1.Container, 2)
-		}
-		pod.Spec.InitContainers[0].Name = "install-cpb"
-		pod.Spec.InitContainers[0].Image = "quay.io/operator-framework/olm:latest"
-		pod.Spec.InitContainers[0].Command = []string{"/bin/cp", "-Rv", "/bin/cpb", "/util/cpb"}
-		pod.Spec.InitContainers[0].VolumeMounts = []corev1.VolumeMount{{Name: "util", MountPath: "/util"}}
-
-		pod.Spec.InitContainers[1].Name = "copy-bundle"
-		pod.Spec.InitContainers[1].Image = bundle.Spec.Image
-		pod.Spec.InitContainers[1].ImagePullPolicy = corev1.PullAlways
-		pod.Spec.InitContainers[1].Command = []string{"/util/cpb", "/bundle"}
-		pod.Spec.InitContainers[1].VolumeMounts = []corev1.VolumeMount{
-			{Name: "util", MountPath: "/util"},
-			{Name: "bundle", MountPath: "/bundle"},
-		}
-
-		if len(pod.Spec.Containers) != 1 {
-			pod.Spec.Containers = make([]corev1.Container, 1)
-		}
-		pod.Spec.Containers[0].Name = "unpack-bundle"
-		pod.Spec.Containers[0].Image = u.unpackImage
-		pod.Spec.Containers[0].ImagePullPolicy = corev1.PullAlways
-		pod.Spec.Containers[0].Args = []string{"--bundle-dir=/bundle"}
-		pod.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{{Name: "bundle", MountPath: "/bundle"}}
-		return nil
-	})
-}
-
-func updateStatusUnpackPending(u *updater.Updater) {
-	u.UpdateStatus(
-		updater.SetBundleInfo(nil),
-		updater.EnsureBundleDigest(""),
-		updater.SetPhase(olmv1alpha1.PhasePending),
-		updater.EnsureCondition(metav1.Condition{
-			Type:   olmv1alpha1.TypeUnpacked,
-			Status: metav1.ConditionFalse,
-			Reason: olmv1alpha1.ReasonUnpackPending,
-		}),
-	)
-}
-
-func updateStatusUnpackFailing(u *updater.Updater, err error) error {
-	u.UpdateStatus(
-		updater.SetPhase(olmv1alpha1.PhaseFailing),
-		updater.EnsureCondition(metav1.Condition{
-			Type:    olmv1alpha1.TypeUnpacked,
-			Status:  metav1.ConditionFalse,
-			Reason:  olmv1alpha1.ReasonUnpackFailed,
-			Message: err.Error(),
-		}),
-	)
-	return err
-}
-
-func (u *PodBundleUnpacker) handleCompletedPod(ctx context.Context, bundle *olmv1alpha1.Bundle, pod *corev1.Pod) (*UnpackResult, error) {
-	contents, err := getPodLogs(ctx, u.kubeClient, pod)
-	if err != nil {
-		return nil, updateStatusUnpackFailing(&u.updater, fmt.Errorf("get pod logs: %w", err))
-	}
-	bundleFS, err := getBundleContents(ctx, contents)
-	if err != nil {
-		return nil, updateStatusUnpackFailing(&u.updater, fmt.Errorf("get bundle contents: %w", err))
-	}
-
-	bundleImageDigest, err := getBundleImageDigest(pod)
-	if err != nil {
-		return nil, updateStatusUnpackFailing(&u.updater, fmt.Errorf("get bundle image digest: %w", err))
-	}
-
-	annotations, err := getAnnotations(bundleFS)
-	if err != nil {
-		return nil, updateStatusUnpackFailing(&u.updater, fmt.Errorf("get bundle annotations: %w", err))
-	}
-
-	objects, err := getObjects(bundleFS)
-	if err != nil {
-		return nil, updateStatusUnpackFailing(&u.updater, fmt.Errorf("get objects from bundle manifests: %w", err))
-	}
-
-	res := &UnpackResult{
-		objects:     objects,
-		imageDigest: bundleImageDigest,
-		annotations: annotations,
-	}
-
-	return res, nil
-}
-
-func getBundleContents(ctx context.Context, contents []byte) (fs.FS, error) {
-	decoder := json.NewDecoder(bytes.NewReader(contents))
-	bundleContents := map[string][]byte{}
-	if err := decoder.Decode(&bundleContents); err != nil {
-		return nil, err
-	}
-	bundleFS := fstest.MapFS{}
-	for name, data := range bundleContents {
-		bundleFS[name] = &fstest.MapFile{Data: data}
-	}
-	return bundleFS, nil
-}
-
-func getPodLogs(ctx context.Context, kubeClient kubernetes.Interface, pod *corev1.Pod) ([]byte, error) {
-	logReader, err := kubeClient.CoreV1().Pods(pod.Namespace).GetLogs(pod.Name, &corev1.PodLogOptions{}).Stream(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("get pod logs: %w", err)
-	}
-	defer logReader.Close()
-	buf := &bytes.Buffer{}
-	if _, err := io.Copy(buf, logReader); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
-}
-
-func getBundleImageDigest(pod *corev1.Pod) (string, error) {
-	for _, ps := range pod.Status.InitContainerStatuses {
-		if ps.Name == "copy-bundle" && ps.ImageID != "" {
-			return ps.ImageID, nil
-		}
-	}
-	return "", fmt.Errorf("bundle image digest not found")
-}
-
-func getAnnotations(bundleFS fs.FS) (*registry.Annotations, error) {
-	fileData, err := fs.ReadFile(bundleFS, filepath.Join("metadata", "annotations.yaml"))
-	if err != nil {
-		return nil, err
-	}
-	annotationsFile := registry.AnnotationsFile{}
-	if err := yaml.Unmarshal(fileData, &annotationsFile); err != nil {
-		return nil, err
-	}
-	return &annotationsFile.Annotations, nil
-}
-
-func getObjects(bundleFS fs.FS) ([]client.Object, error) {
-	var objects []client.Object
-	const manifestsDir = "manifests"
-
-	entries, err := fs.ReadDir(bundleFS, manifestsDir)
-	if err != nil {
-		return nil, fmt.Errorf("read manifests: %w", err)
-	}
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		fileData, err := fs.ReadFile(bundleFS, filepath.Join(manifestsDir, e.Name()))
-		if err != nil {
-			return nil, err
-		}
-
-		dec := apimachyaml.NewYAMLOrJSONDecoder(bytes.NewReader(fileData), 1024)
-		for {
-			obj := unstructured.Unstructured{}
-			err := dec.Decode(&obj)
-			if errors.Is(err, io.EOF) {
-				break
-			} else if err != nil {
-				return nil, err
-			}
-			objects = append(objects, &obj)
-		}
-	}
-	return objects, nil
 }
 
 // SetupWithManager sets up the controller with the Manager.
