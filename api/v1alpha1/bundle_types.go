@@ -40,9 +40,20 @@ const (
 type BundleSpec struct {
 	// ProvisionerClassName sets the name of the provisioner that should reconcile this BundleInstance.
 	ProvisionerClassName string `json:"provisionerClassName"`
+	// Source defines the configuration for the underlying Bundle content.
+	Source BundleSource `json:"source"`
+}
 
+type BundleSource struct {
+	// Type defines the kind of Bundle content being sourced.
+	Type string `json:"type"`
 	// Image is the bundle image that backs the content of this bundle.
-	Image string `json:"image"`
+	Image ImageSource `json:"image,omitempty"`
+}
+
+type ImageSource struct {
+	// Ref contains the reference to a container image containing Bundle contents.
+	Ref string `json:"ref"`
 }
 
 type ProvisionerID string
