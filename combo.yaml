@@ -1,0 +1,23 @@
+apiVersion: core.rukpak.io/v1alpha1
+kind: Bundle
+metadata:
+  name: combo-test-commit-ref
+spec:
+  provisionerClassName: core.rukpak.io/plain
+  source:
+    type: git
+    git:
+      repository: https://github.com/operator-framework/combo
+      directory: ./manifests
+      ref:
+        commit: 4567031e158b42263e70a7c63e29f8981a4a6135
+
+---
+
+apiVersion: core.rukpak.io/v1alpha1
+kind: BundleInstance
+metadata:
+  name: combo
+spec:
+  provisionerClassName: core.rukpak.io/plain
+  bundleName: combo-test-commit-ref
