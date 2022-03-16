@@ -71,10 +71,6 @@ type BundleReconciler struct {
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
-// TODO(user): Modify the Reconcile function to compare the state specified by
-// the Bundle object against the actual cluster state, and then
-// perform operations to make the cluster state reflect the state specified by
-// the user.
 //
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.9.2/pkg/reconcile
@@ -224,7 +220,7 @@ func (r *BundleReconciler) ensureUnpackPod(ctx context.Context, bundle *rukpakv1
 			pod.Spec.Containers = make([]corev1.Container, 1)
 		}
 		pod.Spec.Containers[0].Name = bundleUnpackContainerName
-		pod.Spec.Containers[0].Image = bundle.Spec.Image
+		pod.Spec.Containers[0].Image = bundle.Spec.Source.Image.Ref
 		pod.Spec.Containers[0].ImagePullPolicy = corev1.PullAlways
 		pod.Spec.Containers[0].Command = []string{"/util/unpack", "--bundle-dir", "/manifests"}
 		pod.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{{Name: "util", MountPath: "/util"}}
