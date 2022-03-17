@@ -72,8 +72,9 @@ UNIT_TEST_DIRS=$(shell go list ./... | grep -v /test/)
 test-unit: setup-envtest ## Run the unit tests
 	eval $$($(SETUP_ENVTEST) use -p env $(ENVTEST_VERSION)) && go test -count=1 -short $(UNIT_TEST_DIRS)
 
+SPECIFIC_E2E_TEST := $(if $(TEST),-focus "$(TEST)")
 test-e2e: ginkgo ## Run the e2e tests
-	$(GINKGO) -v -trace -progress test/e2e
+	$(GINKGO) -v -trace -progress $(SPECIFIC_E2E_TEST) test/e2e
 
 ###################
 # Install and Run #
