@@ -271,7 +271,6 @@ var _ = Describe("plain provisioner bundle", func() {
 						Type: "git",
 						Git: rukpakv1alpha1.GitSource{
 							Repository: "https://github.com/operator-framework/combo",
-							Directory:  "/manifests",
 							Ref: rukpakv1alpha1.GitRef{
 								Commit: "4567031e158b42263e70a7c63e29f8981a4a6135",
 							},
@@ -306,42 +305,9 @@ var _ = Describe("plain provisioner bundle", func() {
 					if bundle.Status.Info == nil {
 						return false
 					}
-					return len(bundle.Status.Info.Objects) == 6
+					return len(bundle.Status.Info.Objects) == 5
 				}).Should(BeTrue())
 			})
-		})
-
-		It("should go into a failed state if the spec.source.type is unsupported", func() {
-			By("updating the bundle spec")
-			Eventually(func() error {
-				if err := c.Get(ctx, client.ObjectKeyFromObject(bundle), bundle); err != nil {
-					return err
-				}
-				bundle.Spec.Source.Type = "random"
-				err := c.Update(ctx, bundle)
-				return err
-			}).Should(Succeed())
-
-			Eventually(func() bool {
-				if err := c.Get(ctx, client.ObjectKeyFromObject(bundle), bundle); err != nil {
-					return false
-				}
-				if bundle.Status.Phase != rukpakv1alpha1.PhaseFailing {
-					return false
-				}
-				unpackPending := meta.FindStatusCondition(bundle.Status.Conditions, rukpakv1alpha1.PhaseUnpacked)
-				if unpackPending == nil {
-					return false
-				}
-				if unpackPending.Type == "True" {
-					return false
-				}
-				// TODO add helpful message when invalid spec.source.type is specified
-				if unpackPending.Message != fmt.Sprintf(`Invalid type specified "%s"`, bundle.Spec.Source.Type) {
-					return false
-				}
-				return true
-			}).Should(BeTrue())
 		})
 	})
 })
