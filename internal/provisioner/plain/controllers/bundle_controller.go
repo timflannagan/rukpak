@@ -41,6 +41,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	rukpakv1alpha1 "github.com/operator-framework/rukpak/api/v1alpha1"
+	"github.com/operator-framework/rukpak/internal/provisioner/plain/pkg/git"
 	"github.com/operator-framework/rukpak/internal/storage"
 	"github.com/operator-framework/rukpak/internal/updater"
 	"github.com/operator-framework/rukpak/internal/util"
@@ -247,18 +248,10 @@ func (r *BundleReconciler) ensureUnpackPod(ctx context.Context, bundle *rukpakv1
 			pod.Spec.InitContainers[1].Image = "bitnami/git:latest"
 			pod.Spec.InitContainers[1].ImagePullPolicy = corev1.PullIfNotPresent
 			// TODO: length check
-			// TODO: function responsible for determine which ref to use
 			// TODO: bundle unpack failing silently when pod log stream is empty (e.g. `{}`)
 			// TODO: bundle has an image custom column -- maybe we need a source type configuration instead?
 			// TODO: bundleinstance reporting a successful installation state despite installing nothing.
-			source := bundle.Spec.Source.Git
-			repository := source.Repository
-			directory := "./manifests"
-			if source.Directory != "" {
-				directory = source.Directory
-			}
-			checkedCommand := fmt.Sprintf("git clone %s && cd %s && git checkout %s && cp -r %s/* /manifests", repository, strings.Split(repository, "/")[4], source.Ref.Commit, directory)
-			pod.Spec.InitContainers[1].Command = []string{"/bin/bash", "-c", checkedCommand}
+			pod.Spec.InitContainers[1].Command = []string{"/bin/bash", "-c", git.CheckoutCommand(bundle.Spec.Source.Git)}
 			pod.Spec.InitContainers[1].VolumeMounts = []corev1.VolumeMount{{Name: "util", MountPath: "/util"}, {Name: "manifests", MountPath: "/manifests"}}
 		}
 
