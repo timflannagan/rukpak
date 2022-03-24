@@ -47,7 +47,7 @@ func TestCheckoutCommand(t *testing.T) {
 	}
 
 	for _, tt := range gitSources {
-		result := CheckoutCommand(tt.source)
+		result, _ := NewCheckoutCmd(tt.source).String()
 		if result != tt.expected {
 			t.Fatalf("expected %s, got %s", tt.expected, result)
 		}

@@ -247,11 +247,14 @@ func (r *BundleReconciler) ensureUnpackPod(ctx context.Context, bundle *rukpakv1
 			pod.Spec.InitContainers[1].Name = "clone-repository"
 			pod.Spec.InitContainers[1].Image = "bitnami/git:latest"
 			pod.Spec.InitContainers[1].ImagePullPolicy = corev1.PullIfNotPresent
-			// TODO: length check
 			// TODO: bundle unpack failing silently when pod log stream is empty (e.g. `{}`)
 			// TODO: bundle has an image custom column -- maybe we need a source type configuration instead?
-			// TODO: bundleinstance reporting a successful installation state despite installing nothing.
-			pod.Spec.InitContainers[1].Command = []string{"/bin/bash", "-c", git.CheckoutCommand(bundle.Spec.Source.Git)}
+			checkoutCmd := git.NewCheckoutCmd(bundle.Spec.Source.Git)
+			c, err := checkoutCmd.String()
+			if err != nil {
+				return err
+			}
+			pod.Spec.InitContainers[1].Command = []string{"/bin/bash", "-c", c}
 			pod.Spec.InitContainers[1].VolumeMounts = []corev1.VolumeMount{{Name: "util", MountPath: "/util"}, {Name: "manifests", MountPath: "/manifests"}}
 		}
 
