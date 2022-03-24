@@ -297,6 +297,21 @@ var _ = Describe("plain provisioner bundle", func() {
 						},
 					},
 				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						GenerateName: "combo-git-defaults",
+					},
+					Spec: rukpakv1alpha1.BundleSpec{
+						ProvisionerClassName: plainProvisionerID,
+						Source: rukpakv1alpha1.BundleSource{
+							Type: "git",
+							Git: rukpakv1alpha1.GitSource{
+								Repository: "https://github.com/operator-framework/combo.git",
+								Ref:        rukpakv1alpha1.GitRef{},
+							},
+						},
+					},
+				},
 			}
 
 			for _, bundle := range bundles {

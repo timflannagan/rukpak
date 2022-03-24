@@ -44,6 +44,13 @@ func TestCheckoutCommand(t *testing.T) {
 			expected: fmt.Sprintf("git clone --depth 1 --branch %s %s && cd %s && git checkout %s && cp -r %s/* /manifests",
 				"dev", "https://github.com/operator-framework/combo", "combo", "dev", "./deploy"),
 		},
+		{
+			source: v1alpha1.GitSource{
+				Repository: "https://github.com/operator-framework/combo.git",
+			},
+			expected: fmt.Sprintf("git clone --depth 1 --branch %s %s && cd %s && git checkout %s && cp -r %s/* /manifests",
+				"main", "https://github.com/operator-framework/combo.git", "combo", "main", "./manifests"),
+		},
 	}
 
 	for _, tt := range gitSources {
