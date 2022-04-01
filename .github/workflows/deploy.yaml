@@ -7,11 +7,11 @@ on:
   pull_request:
     branches: [ main ]
 
-jobs: 
+jobs:
   main:
     runs-on: ubuntu-latest
     env:
-      IMAGE: quay.io/operator-framework/plain-provisioner:main
+      IMAGE: quay.io/tflannag/rukpak:latest
     steps:
       - uses: actions/checkout@v2
       - uses: actions/setup-go@v2
@@ -19,17 +19,16 @@ jobs:
           go-version: '~1.17'
 
       - name: Build container
-        run: make build-container
+        run: make build-container IMAGE=${{ env.IMAGE }}
 
       - name: Login to quay.io
         uses: docker/login-action@v1
-        if: ${{ (github.event_name != 'pull_request' && github.ref == 'refs/heads/main') }}
+        # if: ${{ (github.event_name != 'pull_request' && github.ref == 'refs/heads/main') }}
         with:
           registry: quay.io
           username: ${{ secrets.QUAY_USERNAME }}
           password: ${{ secrets.QUAY_PASSWORD }}
 
       - name: Push Docker image
-        if: ${{ (github.event_name != 'pull_request' && github.ref == 'refs/heads/main') }}
+        # if: ${{ (github.event_name != 'pull_request' && github.ref == 'refs/heads/main') }}
         run: docker push ${{ env.IMAGE }}
-
