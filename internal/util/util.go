@@ -16,6 +16,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/selection"
+	"k8s.io/apimachinery/pkg/util/rand"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -40,21 +41,47 @@ func BundleInstanceProvisionerFilter(provisionerClassName string) predicate.Pred
 
 func MapBundleToBundleInstanceHandler(cl client.Client, log logr.Logger) handler.MapFunc {
 	return func(object client.Object) []reconcile.Request {
-		b := object.(*rukpakv1alpha1.Bundle)
+		b, ok := object.(*rukpakv1alpha1.Bundle)
+		if !ok {
+			return nil
+		}
 		bundleInstances := &rukpakv1alpha1.BundleInstanceList{}
-		var requests []reconcile.Request
 		if err := cl.List(context.Background(), bundleInstances); err != nil {
 			log.WithName("mapBundleToBundleInstanceHandler").Error(err, "list bundles")
-			return requests
+			return nil
 		}
+		var requests []reconcile.Request
 		for _, bi := range bundleInstances.Items {
 			bi := bi
-			if bi.Spec.BundleName == b.Name {
-				requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&bi)})
+			for _, ref := range b.GetOwnerReferences() {
+				if ref.Name == bi.GetName() {
+					requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&bi)})
+				}
 			}
 		}
 		return requests
 	}
+}
+
+// CheckExistingBundlesMatchesTemplate evaluates whether the existing list of Bundle objects
+// match the desired Bundle template that's specified in a BundleInstance object. If a match
+// is found, that Bundle object is returned, so callers are responsible for nil checking the result.
+func CheckExistingBundlesMatchesTemplate(existingBundles []*rukpakv1alpha1.Bundle, desiredBundleTemplate *rukpakv1alpha1.BundleTemplate) *rukpakv1alpha1.Bundle {
+	for _, bundle := range existingBundles {
+		if !CheckDesiredBundleTemplate(bundle, desiredBundleTemplate) {
+			continue
+		}
+		return bundle
+	}
+	return nil
+}
+
+// CheckDesiredBundleTemplate is responsible for determining whether the existingBundle
+// parameter is semantically equal to the desiredBundle Bundle template.
+func CheckDesiredBundleTemplate(existingBundle *rukpakv1alpha1.Bundle, desiredBundle *rukpakv1alpha1.BundleTemplate) bool {
+	// FIXME: cleanup this implementation by sanitizing metadata fields.
+	// Note: ran into hotlooping behavior when checking for an annotations diff.
+	return equality.Semantic.DeepEqual(existingBundle.Spec, desiredBundle.Spec) && equality.Semantic.DeepEqual(existingBundle.Labels, desiredBundle.Labels)
 }
 
 // GetPodNamespace checks whether the controller is running in a Pod vs.
@@ -79,6 +106,10 @@ func BundleLabels(bundleName string) map[string]string {
 
 func MetadataConfigMapName(bundleName string) string {
 	return fmt.Sprintf("bundle-metadata-%s", bundleName)
+}
+
+func GenerateBundleName(biName string) string {
+	return fmt.Sprintf("%s-%s", biName, rand.String(5))
 }
 
 func newLabelSelector(name, kind string) labels.Selector {

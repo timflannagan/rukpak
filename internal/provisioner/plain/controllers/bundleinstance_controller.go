@@ -21,6 +21,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 
 	helmclient "github.com/operator-framework/helm-operator-plugins/pkg/client"
@@ -28,13 +29,13 @@ import (
 	"helm.sh/helm/v3/pkg/chart"
 	"helm.sh/helm/v3/pkg/release"
 	"helm.sh/helm/v3/pkg/storage/driver"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -46,12 +47,17 @@ import (
 
 	rukpakv1alpha1 "github.com/operator-framework/rukpak/api/v1alpha1"
 	helmpredicate "github.com/operator-framework/rukpak/internal/helm-operator-plugins/predicate"
+	provisioner "github.com/operator-framework/rukpak/internal/provisioner/ids"
 	"github.com/operator-framework/rukpak/internal/storage"
 	"github.com/operator-framework/rukpak/internal/util"
 )
 
 const (
-	plainBundleProvisionerID = "core.rukpak.io/plain"
+	maxGeneratedBundleLimit = 4
+)
+
+var (
+	ErrMaxGeneratedLimit = errors.New("reached the maximum generated Bundle limit")
 )
 
 // BundleInstanceReconciler reconciles a BundleInstance object
@@ -76,15 +82,11 @@ type BundleInstanceReconciler struct {
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
-// TODO(user): Modify the Reconcile function to compare the state specified by
-// the BundleInstance object against the actual cluster state, and then
-// perform operations to make the cluster state reflect the state specified by
-// the user.
 //
 // For more details, check Reconcile and its Result here:
 // - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.9.2/pkg/reconcile
 func (r *BundleInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	l := log.FromContext(ctx)
+	l := log.FromContext(ctx).WithValues("req", req.NamespacedName)
 	l.V(1).Info("starting reconciliation")
 	defer l.V(1).Info("ending reconciliation")
 
@@ -95,32 +97,38 @@ func (r *BundleInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	defer func() {
 		bi := bi.DeepCopy()
 		bi.ObjectMeta.ManagedFields = nil
-		if err := r.Status().Patch(ctx, bi, client.Apply, client.FieldOwner(plainBundleProvisionerID)); err != nil {
+		if err := r.Status().Patch(ctx, bi, client.Apply, client.FieldOwner(provisioner.PlainID)); err != nil {
 			l.Error(err, "failed to patch status")
 		}
 	}()
 
-	b := &rukpakv1alpha1.Bundle{}
-	if err := r.Get(ctx, types.NamespacedName{Name: bi.Spec.BundleName}, b); err != nil {
-		bundleStatus := metav1.ConditionUnknown
-		if apierrors.IsNotFound(err) {
-			bundleStatus = metav1.ConditionFalse
+	bundle, oldBundles, err := r.reconcileDesiredBundle(ctx, bi)
+	if err != nil {
+		if errors.Is(err, ErrMaxGeneratedLimit) {
+			meta.SetStatusCondition(&bi.Status.Conditions, metav1.Condition{
+				Type:    rukpakv1alpha1.TypeHasValidBundle,
+				Status:  metav1.ConditionFalse,
+				Reason:  "InvalidDesiredBundle",
+				Message: err.Error(),
+			})
+			return ctrl.Result{}, nil
 		}
+		// TODO: clean up this condition block
 		meta.SetStatusCondition(&bi.Status.Conditions, metav1.Condition{
 			Type:    rukpakv1alpha1.TypeHasValidBundle,
-			Status:  bundleStatus,
-			Reason:  rukpakv1alpha1.ReasonBundleLookupFailed,
+			Status:  metav1.ConditionFalse,
+			Reason:  "InvalidDesiredBundle",
 			Message: err.Error(),
 		})
-		return ctrl.Result{}, client.IgnoreNotFound(err)
+		return ctrl.Result{}, err
 	}
 
-	desiredObjects, err := r.loadBundle(ctx, bi)
+	desiredObjects, err := r.loadBundle(ctx, bundle, bi.GetName())
 	if err != nil {
 		var bnuErr *errBundleNotUnpacked
 		if errors.As(err, &bnuErr) {
-			reason := fmt.Sprintf("BundleUnpack%s", b.Status.Phase)
-			if b.Status.Phase == rukpakv1alpha1.PhaseUnpacking {
+			reason := fmt.Sprintf("BundleUnpack%s", bundle.Status.Phase)
+			if bundle.Status.Phase == rukpakv1alpha1.PhaseUnpacking {
 				reason = "BundleUnpackRunning"
 			}
 			meta.SetStatusCondition(&bi.Status.Conditions, metav1.Condition{
@@ -267,8 +275,101 @@ func (r *BundleInstanceReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		Status: metav1.ConditionTrue,
 		Reason: rukpakv1alpha1.ReasonInstallationSucceeded,
 	})
-	bi.Status.InstalledBundleName = bi.Spec.BundleName
+	bi.Status.InstalledBundleName = bundle.GetName()
+
+	if _, err := r.reconcileOldBundles(ctx, oldBundles, bundle); err != nil {
+		// TODO: clean up this condition block
+		meta.SetStatusCondition(&bi.Status.Conditions, metav1.Condition{
+			Type:    "Pivoted",
+			Status:  metav1.ConditionFalse,
+			Reason:  "ReplacementFailed",
+			Message: err.Error(),
+		})
+		return ctrl.Result{}, err
+	}
+
 	return ctrl.Result{}, nil
+}
+
+// reconcileDesiredBundle is responsible for checking whether the desired
+// Bundle resource that's specified in the BundleInstance parameter's
+// spec.Template configuration is present on cluster, and if not, creates
+// a new Bundle resource matching that desired specification.
+func (r *BundleInstanceReconciler) reconcileDesiredBundle(ctx context.Context, bi *rukpakv1alpha1.BundleInstance) (*rukpakv1alpha1.Bundle, []*rukpakv1alpha1.Bundle, error) {
+	// get the set of Bundle resources that already exist on cluster, and sort
+	// by metadata.CreationTimestamp in the case there's multiple Bundles
+	// that match the label selector.
+	existingBundles, err := r.getBundlesForBundleInstanceSelector(ctx, bi)
+	if err != nil {
+		return nil, nil, err
+	}
+	sort.Sort(util.BundlesByCreationTimestamp(existingBundles))
+	// check whether the BI controller has already reached the maximum
+	// generated Bundle limit to avoid hotlooping scenarios.
+	if len(existingBundles) > maxGeneratedBundleLimit {
+		return nil, nil, ErrMaxGeneratedLimit
+	}
+
+	// check whether there's an existing Bundle that matches the desired Bundle template
+	// specified in the BI resource, and if not, generate a new matches the template.
+	b := util.CheckExistingBundlesMatchesTemplate(existingBundles, bi.Spec.Template)
+	if b == nil {
+		controllerRef := metav1.NewControllerRef(bi, bi.GroupVersionKind())
+		b = &rukpakv1alpha1.Bundle{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:            util.GenerateBundleName(bi.GetName()),
+				OwnerReferences: []metav1.OwnerReference{*controllerRef},
+				Labels:          bi.Spec.Template.Labels,
+			},
+			Spec: bi.Spec.Template.Spec,
+		}
+		if err := r.Create(ctx, b); err != nil {
+			return nil, nil, err
+		}
+	}
+	return b, existingBundles, err
+}
+
+// getBundlesForBundleInstanceSelector is responsible for returning a list of
+// Bundle resource that exist on cluster that match the label selector specified
+// in the BI parameter's spec.Selector field.
+func (r *BundleInstanceReconciler) getBundlesForBundleInstanceSelector(ctx context.Context, bi *rukpakv1alpha1.BundleInstance) ([]*rukpakv1alpha1.Bundle, error) {
+	bundleSelector, err := metav1.LabelSelectorAsSelector(bi.Spec.Selector)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse the %s label selector: %w", bi.Spec.Selector.String(), err)
+	}
+	bundleList := &rukpakv1alpha1.BundleList{}
+	if err := r.List(ctx, bundleList, &client.ListOptions{
+		LabelSelector: bundleSelector,
+	}); err != nil {
+		return nil, fmt.Errorf("failed to list bundles using the %s selector: %w", bundleSelector.String(), err)
+	}
+	bundles := []*rukpakv1alpha1.Bundle{}
+	for _, b := range bundleList.Items {
+		bundles = append(bundles, b.DeepCopy())
+	}
+
+	return bundles, nil
+}
+
+// reconcileOldBundles is responsible for garbage collecting any Bundles
+// that no longer match the desired Bundle template.
+func (r *BundleInstanceReconciler) reconcileOldBundles(ctx context.Context, oldBundles []*rukpakv1alpha1.Bundle, currBundle *rukpakv1alpha1.Bundle) (int, error) {
+	var (
+		errors         []error
+		deletedBundles int
+	)
+	for _, b := range oldBundles {
+		if b.GetName() == currBundle.GetName() {
+			continue
+		}
+		if err := r.Delete(ctx, b); err != nil {
+			errors = append(errors, err)
+			continue
+		}
+		deletedBundles++
+	}
+	return deletedBundles, utilerrors.NewAggregate(errors)
 }
 
 type releaseState string
@@ -315,10 +416,10 @@ func (err errBundleNotUnpacked) Error() string {
 	return fmt.Sprintf("%s, current phase=%s", baseError, err.currentPhase)
 }
 
-func (r *BundleInstanceReconciler) loadBundle(ctx context.Context, bi *rukpakv1alpha1.BundleInstance) ([]client.Object, error) {
+func (r *BundleInstanceReconciler) loadBundle(ctx context.Context, bundle *rukpakv1alpha1.Bundle, biName string) ([]client.Object, error) {
 	b := &rukpakv1alpha1.Bundle{}
-	if err := r.Get(ctx, types.NamespacedName{Name: bi.Spec.BundleName}, b); err != nil {
-		return nil, fmt.Errorf("get bundle %q: %w", bi.Spec.BundleName, err)
+	if err := r.Get(ctx, types.NamespacedName{Name: bundle.GetName()}, b); err != nil {
+		return nil, fmt.Errorf("get bundle %q: %w", bundle.GetName(), err)
 	}
 	if b.Status.Phase != rukpakv1alpha1.PhaseUnpacked {
 		return nil, &errBundleNotUnpacked{currentPhase: b.Status.Phase}
@@ -334,7 +435,7 @@ func (r *BundleInstanceReconciler) loadBundle(ctx context.Context, bi *rukpakv1a
 		obj := obj
 		obj.SetLabels(util.MergeMaps(obj.GetLabels(), map[string]string{
 			util.CoreOwnerKindKey: rukpakv1alpha1.BundleInstanceKind,
-			util.CoreOwnerNameKey: bi.Name,
+			util.CoreOwnerNameKey: biName,
 		}))
 		objs = append(objs, &obj)
 	}
@@ -344,7 +445,7 @@ func (r *BundleInstanceReconciler) loadBundle(ctx context.Context, bi *rukpakv1a
 // SetupWithManager sets up the controller with the Manager.
 func (r *BundleInstanceReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	controller, err := ctrl.NewControllerManagedBy(mgr).
-		For(&rukpakv1alpha1.BundleInstance{}, builder.WithPredicates(util.BundleInstanceProvisionerFilter(plainBundleProvisionerID))).
+		For(&rukpakv1alpha1.BundleInstance{}, builder.WithPredicates(util.BundleInstanceProvisionerFilter(provisioner.PlainID))).
 		Watches(&source.Kind{Type: &rukpakv1alpha1.Bundle{}}, handler.EnqueueRequestsFromMapFunc(util.MapBundleToBundleInstanceHandler(mgr.GetClient(), mgr.GetLogger()))).
 		Build(r)
 	if err != nil {

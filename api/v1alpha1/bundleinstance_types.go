@@ -46,24 +46,35 @@ const (
 type BundleInstanceSpec struct {
 	// ProvisionerClassName sets the name of the provisioner that should reconcile this BundleInstance.
 	ProvisionerClassName string `json:"provisionerClassName"`
+	// Label selector for Bundles resources.
+	Selector *metav1.LabelSelector `json:"selector"`
+	// Template describes the generated Bundle that this instance will manage.
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:Schemaless
+	Template *BundleTemplate `json:"template"`
+}
 
-	// BundleName is the name of the bundle that this instance is managing on the cluster.
-	BundleName string `json:"bundleName"`
+// BundleTemplate defines the desired state of a Bundle resource
+type BundleTemplate struct {
+	// Standard object's metadata.
+	// More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#metadata
+	// +optional
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+	// Specification of the desired behavior of the Bundle.
+	// More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#spec-and-status
+	// +optional
+	Spec BundleSpec `json:"spec,omitempty"`
 }
 
 // BundleInstanceStatus defines the observed state of BundleInstance
 type BundleInstanceStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-	Conditions []metav1.Condition `json:"conditions,omitempty"`
-
-	InstalledBundleName string `json:"installedBundleName,omitempty"`
+	Conditions          []metav1.Condition `json:"conditions,omitempty"`
+	InstalledBundleName string             `json:"installedBundleName,omitempty"`
 }
 
 //+kubebuilder:object:root=true
 //+kubebuilder:resource:scope=Cluster
 //+kubebuilder:subresource:status
-//+kubebuilder:printcolumn:name="Desired Bundle",type=string,JSONPath=`.spec.bundleName`
 //+kubebuilder:printcolumn:name="Installed Bundle",type=string,JSONPath=`.status.installedBundleName`
 //+kubebuilder:printcolumn:name="Install State",type=string,JSONPath=`.status.conditions[?(.type=="Installed")].reason`
 //+kubebuilder:printcolumn:name=Age,type=date,JSONPath=`.metadata.creationTimestamp`
