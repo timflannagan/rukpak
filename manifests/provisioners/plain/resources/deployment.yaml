@@ -31,11 +31,11 @@ spec:
               protocol: TCP
               name: https
         - name: manager
-          image: quay.io/operator-framework/rukpak:latest
+          image: quay.io/tflannag/rukpak:latest
           imagePullPolicy: IfNotPresent
           command: ["/plain"]
           args:
-            - "--unpack-image=quay.io/operator-framework/rukpak:latest"
+            - "--unpack-image=quay.io/tflannag/rukpak:latest"
             - "--storage-dir=/var/cache/bundles"
             - "--http-bind-address=127.0.0.1:8080"
             - "--http-external-address=https://$(PLAIN_PROVISIONER_SERVICE_NAME).$(PLAIN_PROVISIONER_SERVICE_NAMESPACE).svc"

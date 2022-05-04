@@ -20,7 +20,7 @@ spec:
         - name: core-webhook
           command: ["/core"]
           args: ["run"]
-          image: quay.io/operator-framework/rukpak:latest
+          image: quay.io/tflannag/rukpak:latest
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080
