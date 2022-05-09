@@ -3,7 +3,7 @@
 ###########################
 ORG := github.com/operator-framework
 PKG := $(ORG)/rukpak
-export IMAGE_REPO ?= quay.io/operator-framework/rukpak
+export IMAGE_REPO ?= quay.io/tflannag/rukpak
 export IMAGE_TAG ?= latest
 IMAGE?=$(IMAGE_REPO):$(IMAGE_TAG)
 KIND_CLUSTER_NAME ?= kind
@@ -13,7 +13,7 @@ TESTDATA_DIR := testdata
 VERSION_PATH := $(PKG)/internal/version
 GIT_COMMIT ?= $(shell git rev-parse HEAD)
 PKGS = $(shell go list ./...)
-CERT_MGR_VERSION=v1.7.1
+export CERT_MGR_VERSION ?= v1.7.1
 RUKPAK_NAMESPACE ?= rukpak-system
 
 CONTAINER_RUNTIME ?= docker
